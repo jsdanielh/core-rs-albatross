@@ -331,8 +331,8 @@ impl DoubleProposalProof {
         mut proposal2: TendermintProposal<MacroHeader>,
         mut justification2: SchnorrSignature,
     ) -> DoubleProposalProof {
-        let hash1: Blake2bHash = proposal1.proposal.hash();
-        let hash2: Blake2bHash = proposal2.proposal.hash();
+        let hash1: Blake2sHash = proposal1.hash();
+        let hash2: Blake2sHash = proposal2.hash();
         if hash1 > hash2 {
             mem::swap(&mut proposal1, &mut proposal2);
             mem::swap(&mut justification1, &mut justification2);
@@ -388,8 +388,8 @@ impl DoubleProposalProof {
         &self,
         signing_key: &SchnorrPublicKey,
     ) -> Result<(), EquivocationProofError> {
-        let hash1: Blake2bHash = self.proposal1.proposal.hash();
-        let hash2: Blake2bHash = self.proposal2.proposal.hash();
+        let hash1: Blake2sHash = self.proposal1.hash();
+        let hash2: Blake2sHash = self.proposal2.hash();
 
         // Check that the headers are not equal and in the right order:
         match hash1.cmp(&hash2) {
@@ -410,8 +410,8 @@ impl DoubleProposalProof {
         }
 
         // Check that the justifications are valid.
-        if !signing_key.verify(&self.justification1, self.proposal1.hash().as_slice())
-            || !signing_key.verify(&self.justification2, self.proposal2.hash().as_slice())
+        if !signing_key.verify(&self.justification1, hash1.as_slice())
+            || !signing_key.verify(&self.justification2, hash2.as_slice())
         {
             return Err(EquivocationProofError::InvalidJustification);
         }
