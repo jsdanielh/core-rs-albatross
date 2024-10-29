@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, fmt::Debug};
 use nimiq_block::{MacroBody, MacroHeader};
 use nimiq_database_value_derive::DbSerializable;
 use nimiq_hash::Blake2sHash;
-use nimiq_keys::Ed25519Signature as SchnorrSignature;
+use nimiq_keys::{Address, Ed25519Signature as SchnorrSignature};
 use nimiq_serde::{Deserialize, Serialize};
 use nimiq_tendermint::{State as TendermintState, Step};
 use nimiq_validator_network::{PubsubId, ValidatorNetwork};
@@ -20,7 +20,8 @@ pub struct MacroState {
     round_number: u32,
     step: Step,
     known_proposals: BTreeMap<Blake2sHash, MacroHeader>,
-    round_proposals: BTreeMap<u32, BTreeMap<Blake2sHash, (Option<u32>, (SchnorrSignature, u16))>>,
+    round_proposals:
+        BTreeMap<u32, BTreeMap<Blake2sHash, (Option<u32>, (SchnorrSignature, Address, u16))>>,
     votes: BTreeMap<(u32, Step), Option<Blake2sHash>>,
     best_votes: BTreeMap<(u32, Step), TendermintContribution>,
     inherents: BTreeMap<Blake2sHash, MacroBody>,
@@ -137,7 +138,7 @@ impl MacroState {
             round: round_number,
             valid_round,
             signature: signature.0,
-            signer: signature.1,
+            signer: signature.2,
         })
     }
 }

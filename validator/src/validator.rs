@@ -422,6 +422,13 @@ where
                     next_block_number,
                     self.macro_state.read().clone(),
                     proposal_stream,
+                    {
+                        let blockchain = Arc::clone(&self.blockchain);
+                        let consensus_state = Arc::clone(&self.consensus_state);
+                        Arc::new(move |double_proposal_proof| {
+                            Self::on_equivocation_proof_impl(&blockchain, &consensus_state, double_proposal_proof.into())
+                        })
+                    },
                 ));
             }
             BlockType::Micro => {
@@ -518,19 +525,23 @@ where
         }
     }
 
-    fn on_equivocation_proof(&mut self, proof: EquivocationProof) {
+    fn on_equivocation_proof_impl(blockchain: &RwLock<Blockchain>, consensus_state: &RwLock<ConsensusState>, proof: EquivocationProof) {
         // Keep the lock until the proof is added to the proof pool.
-        let blockchain = self.blockchain.read();
+        let blockchain = blockchain.read();
         if blockchain
             .history_store
             .has_equivocation_proof(proof.locator(), None)
         {
             return;
         }
-        self.consensus_state
+        consensus_state
             .write()
             .equivocation_proofs
             .insert(proof);
+    }
+
+    fn on_equivocation_proof(&mut self, proof: EquivocationProof) {
+        Self::on_equivocation_proof_impl(&self.blockchain, &self.consensus_state, proof);
     }
 
     fn poll_macro(&mut self, cx: &mut Context<'_>) {

@@ -2,6 +2,7 @@
 extern crate log;
 
 pub mod aggregation;
+mod double_proposal;
 mod jail;
 mod r#macro;
 mod micro;
