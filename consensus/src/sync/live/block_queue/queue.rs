@@ -176,15 +176,7 @@ impl<N: Network> BlockQueue<N> {
 
         let parent_known = blockchain.contains(block.parent_hash(), true);
         drop(blockchain);
-
-        // Check if a macro block boundary was passed.
-        // If so prune the block buffer as well as pending requests.
         let macro_height = Policy::last_macro_block(head_height);
-        if macro_height > self.current_macro_height {
-            self.current_macro_height = macro_height;
-            self.prune_pending_requests();
-            self.prune_buffer();
-        }
 
         if block_number < head_height.saturating_sub(self.config.tolerate_past_max) {
             block_source.ignore_block(&self.network);
@@ -224,9 +216,24 @@ impl<N: Network> BlockQueue<N> {
                 macro_height
             );
             block_source.ignore_block(&self.network);
-        } else {
-            // Block is inside the buffer window, put it in the buffer.
+        } else if !self.request_component.has_pending_requests()
+            || macro_height == Policy::last_macro_block(block_number)
+        {
+            // We only allow a new request missing blocks to start if the block is from the
+            // current batch or if there are no ongoing request.
             self.buffer_and_request_missing_blocks(block, block_source);
+        } else {
+            // If we are on not within the same batch or we already are requesting blocks,
+            // we just buffer it without requesting for blocks.
+            // Any potential gaps will be filled after we sync up to the batch.
+            if self.insert_block_into_buffer(block, block_source) {
+                log::trace!(block_number, "Buffering block");
+            } else {
+                log::trace!(
+                    block_number,
+                    "Not buffering block - already known or exceeded the per peer limit",
+                );
+            }
         }
 
         None
@@ -622,6 +629,18 @@ impl<N: Network> BlockQueue<N> {
         });
     }
 
+    fn check_and_prune(&mut self) {
+        let block_macro_height = self.blockchain.read().macro_head().block_number();
+
+        // Check if a macro block boundary was passed.
+        // If so prune the block buffer as well as pending requests.
+        if self.current_macro_height < block_macro_height {
+            self.current_macro_height = block_macro_height;
+            self.prune_pending_requests();
+            self.prune_buffer();
+        }
+    }
+
     /// Cleans up buffered blocks and removes blocks that precede the current macro block.
     fn prune_buffer(&mut self) {
         self.buffer.retain(|&block_number, blocks| {
@@ -801,22 +820,8 @@ impl<N: Network> Stream for BlockQueue<N> {
             }
         }
 
-        // Get as many blocks from the gossipsub stream as possible.
-        loop {
-            match self.block_stream.poll_next_unpin(cx) {
-                Poll::Ready(Some((block, block_source))) => {
-                    if self.num_peers() > 0 {
-                        log::debug!(%block, peer_id = %block_source.peer_id(), "Received block via gossipsub");
-                        if let Some(block) = self.check_announced_block(block, block_source) {
-                            return Poll::Ready(Some(block));
-                        }
-                    }
-                }
-                // If the block_stream is exhausted, we quit as well.
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Pending => break,
-            }
-        }
+        // Prune anything that is no longer relevant before adding more requests and blocks to our structs.
+        self.check_and_prune();
 
         // Read all the responses we got for our missing blocks requests.
         loop {
@@ -855,6 +860,23 @@ impl<N: Network> Stream for BlockQueue<N> {
                 }
                 // The block request component never returns `None`.
                 Poll::Ready(None) => unreachable!(),
+                Poll::Pending => break,
+            }
+        }
+
+        // Get as many blocks from the gossipsub stream as possible.
+        loop {
+            match self.block_stream.poll_next_unpin(cx) {
+                Poll::Ready(Some((block, block_source))) => {
+                    if self.num_peers() > 0 {
+                        log::debug!(%block, peer_id = %block_source.peer_id(), "Received block via gossipsub");
+                        if let Some(block) = self.check_announced_block(block, block_source) {
+                            return Poll::Ready(Some(block));
+                        }
+                    }
+                }
+                // If the block_stream is exhausted, we quit as well.
+                Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Pending => break,
             }
         }

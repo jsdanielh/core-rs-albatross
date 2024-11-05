@@ -31,7 +31,6 @@ use nimiq_test_utils::{
 };
 use nimiq_utils::time::OffsetTime;
 use parking_lot::{Mutex, RwLock};
-use rand::Rng;
 use tokio::{sync::mpsc, task::yield_now};
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -242,7 +241,7 @@ async fn send_two_micro_blocks_out_of_order() {
 }
 
 #[test(tokio::test)]
-async fn send_micro_blocks_out_of_order() {
+async fn try_to_induce_request_missing_blocks_on_next_batch() {
     let blockchain1 = blockchain();
     let blockchain_proxy_1 = BlockchainProxy::from(&blockchain1);
     let blockchain2 = blockchain();
@@ -272,73 +271,258 @@ async fn send_micro_blocks_out_of_order() {
         MockHistorySyncStream::new(),
     );
 
-    let mock_node =
-        MockNode::with_network_and_blockchain(Arc::new(hub.new_network()), blockchain());
+    let mut mock_node = MockNode::with_network_and_blockchain(
+        Arc::new(hub.new_network()),
+        Arc::clone(&blockchain2),
+    );
+
     network.dial_mock(&mock_node.network);
     syncer
         .live_sync
         .add_peer(mock_node.network.get_local_peer_id());
 
-    let mut rng = test_rng(false);
-    let mut ordered_blocks = Vec::new();
+    let mut blocks = Vec::new();
 
     let mock_id = MockId::new(mock_node.network.get_local_peer_id());
     let producer = BlockProducer::new(signing_key(), voting_key());
-    let n_blocks = rng.gen_range(2..15);
+    let first_gossiped_block = 6;
 
-    for _ in 0..n_blocks {
+    for _ in 0..first_gossiped_block + 2 {
         let block = push_micro_block(&producer, &blockchain2);
-        ordered_blocks.push(block);
+        blocks.push(block);
     }
+    // Finish producing that batch and add one more block on the next batch.
+    produce_macro_blocks(&producer, &blockchain2, 1);
+    let block_next_batch = push_micro_block(&producer, &blockchain2);
+    let block_next_batch2 = push_micro_block(&producer, &blockchain2);
 
-    let mut blocks = ordered_blocks.clone();
+    // Send block 6.
+    block_tx
+        .send((blocks[first_gossiped_block - 1].clone(), mock_id.clone()))
+        .await
+        .unwrap();
+    // Run the block_queue one iteration, i.e. until it processed one block.
+    let _ = poll!(syncer.next());
+    // Yield to allow the internal BlockQueue task to proceed.
+    yield_now().await;
 
-    while blocks.len() > 1 {
-        let index = rng.gen_range(1..blocks.len());
-
-        block_tx
-            .send((blocks.remove(index).clone(), mock_id.clone()))
-            .await
-            .unwrap();
-
-        // Run the block_queue one iteration, i.e. until it processed one block
-        let _ = poll!(syncer.next());
-        // Yield to allow the internal BlockQueue task to proceed.
-        yield_now().await;
-    }
-
-    // All blocks should be buffered
+    // Only block 6 should be buffered and a request missing blocks should be sent.
     assert_eq!(
         blockchain1.read().block_number(),
         Policy::genesis_block_number()
     );
-
     // Obtain the buffered blocks
+    assert_eq!(syncer.live_sync.queue().num_buffered_blocks() as u64, 1);
+
+    // Send block on the next batch and assert that we buffer it without sending missing blocks requests.
+    block_tx
+        .send((block_next_batch.clone(), mock_id.clone()))
+        .await
+        .unwrap();
+    let _ = poll!(syncer.next());
+    yield_now().await;
+
+    // No new blocks should be added to the chain.
     assert_eq!(
-        syncer.live_sync.queue().num_buffered_blocks() as u64,
-        n_blocks - 1
+        blockchain1.read().block_number(),
+        Policy::genesis_block_number()
     );
+    // We should have 2 buffered block, the first block that was gossiped and the new gossiped one.
+    assert_eq!(syncer.live_sync.queue().num_buffered_blocks() as u64, 2);
 
-    // Now send block1 to fill the gap
-    block_tx.send((blocks[0].clone(), mock_id)).await.unwrap();
-
-    for _ in 0..n_blocks {
+    // Now send blocks 1-5 to fill the gap.
+    for i in 0..first_gossiped_block - 1 {
+        block_tx
+            .send((blocks[i].clone(), mock_id.clone()))
+            .await
+            .unwrap();
         syncer.next().await;
     }
+    syncer.next().await;
 
-    // Verify all blocks except the genesis
-    for i in 1..=n_blocks {
+    // Verify all blocks except the genesis.
+    for i in 1..=first_gossiped_block - 1 {
         assert_eq!(
             blockchain1
                 .read()
                 .get_block_at(i as u32 + Policy::genesis_block_number(), true, None)
                 .unwrap(),
-            ordered_blocks[(i - 1) as usize]
+            blocks[(i - 1) as usize]
         );
     }
+    assert_eq!(syncer.live_sync.queue().num_buffered_blocks(), 1);
 
-    // No blocks buffered
-    assert_eq!(syncer.live_sync.queue().num_buffered_blocks(), 0);
+    // Send block on next batch again, nothing should be done since the block is already buffered.
+    block_tx
+        .send((block_next_batch.clone(), mock_id.clone()))
+        .await
+        .unwrap();
+    let _ = poll!(syncer.next());
+    yield_now().await;
+    assert_eq!(
+        blockchain1.read().block_number(),
+        first_gossiped_block as u32 + Policy::genesis_block_number()
+    );
+    assert_eq!(syncer.live_sync.queue().num_buffered_blocks() as u64, 1);
+    // Let old missing blocks request be processed.
+    // The reply will result in the blocks being discarded since they have been applied through the block stream.
+    mock_node.next().await;
+    syncer.next().await;
+    assert_eq!(syncer.live_sync.queue().num_buffered_blocks() as u64, 1);
+
+    // Send block on the next batch. It is already buffered but now a missing blocks request should be sent.
+    block_tx
+        .send((block_next_batch2.clone(), mock_id.clone()))
+        .await
+        .unwrap();
+    _ = poll!(syncer.next());
+    yield_now().await;
+    assert_eq!(
+        blockchain1.read().block_number(),
+        first_gossiped_block as u32 + Policy::genesis_block_number()
+    );
+    assert_eq!(syncer.live_sync.queue().num_buffered_blocks() as u64, 2);
+
+    // Allow the last requests missing blocks to finish.
+    mock_node.next().await;
+    syncer.next().await;
+    syncer.next().await; // To push the buffered block 1
+    assert_eq!(blockchain1.read().head_hash(), block_next_batch.hash());
+    syncer.next().await;
+    _ = poll!(syncer.next()); // To push the buffered block 2
+    assert_eq!(blockchain1.read().head_hash(), block_next_batch2.hash());
+    assert_eq!(syncer.live_sync.queue().num_buffered_blocks() as u64, 0);
+}
+
+#[test(tokio::test)]
+async fn try_to_induce_request_missing_blocks_gaps() {
+    let blockchain1 = blockchain();
+    let blockchain_proxy_1 = BlockchainProxy::from(&blockchain1);
+    let blockchain2 = blockchain();
+
+    let mut hub = MockHub::new();
+    let network = Arc::new(hub.new_network());
+    let (block_tx, block_rx) = mpsc::channel(32);
+
+    let block_queue = BlockQueue::with_gossipsub_block_stream(
+        blockchain_proxy_1.clone(),
+        Arc::clone(&network),
+        ReceiverStream::new(block_rx).boxed(),
+        QueueConfig::default(),
+    );
+
+    let live_sync = BlockLiveSync::with_queue(
+        blockchain_proxy_1.clone(),
+        Arc::clone(&network),
+        block_queue,
+        bls_cache(),
+    );
+
+    let mut syncer = Syncer::new(
+        blockchain_proxy_1,
+        Arc::clone(&network),
+        live_sync,
+        MockHistorySyncStream::new(),
+    );
+
+    let mut mock_node = MockNode::with_network_and_blockchain(
+        Arc::new(hub.new_network()),
+        Arc::clone(&blockchain2),
+    );
+
+    network.dial_mock(&mock_node.network);
+    syncer
+        .live_sync
+        .add_peer(mock_node.network.get_local_peer_id());
+
+    let mut blocks = Vec::new();
+
+    let mock_id = MockId::new(mock_node.network.get_local_peer_id());
+    let producer = BlockProducer::new(signing_key(), voting_key());
+    let total_blocks: usize = 10;
+    let first_gossiped_block: usize = 6;
+
+    for _ in 0..total_blocks {
+        let block = push_micro_block(&producer, &blockchain2);
+        blocks.push(block);
+    }
+
+    // Send block 6.
+    block_tx
+        .send((blocks[first_gossiped_block - 1].clone(), mock_id.clone()))
+        .await
+        .unwrap();
+    // Run the block_queue one iteration, i.e. until it processed one block.
+    let _ = poll!(syncer.next());
+    // Yield to allow the internal BlockQueue task to proceed.
+    yield_now().await;
+
+    // Only block 6 should be buffered and a request missing blocks should be sent.
+    assert_eq!(
+        blockchain1.read().block_number(),
+        Policy::genesis_block_number()
+    );
+    // Obtain the buffered blocks
+    assert_eq!(syncer.live_sync.queue().num_buffered_blocks() as u64, 1);
+
+    // Send block 8, thus creating a gap and assert that we request missing blocks for it.
+    let index = 7;
+    block_tx
+        .send((blocks[index].clone(), mock_id.clone()))
+        .await
+        .unwrap();
+    let _ = poll!(syncer.next());
+    yield_now().await;
+
+    assert_eq!(
+        blockchain1.read().block_number(),
+        Policy::genesis_block_number()
+    );
+    // One more block should be buffered.
+    assert_eq!(syncer.live_sync.queue().num_buffered_blocks() as u64, 2);
+
+    // Now send blocks 1-5 to fill the gap.
+    for i in 0..first_gossiped_block - 1 {
+        block_tx
+            .send((blocks[i].clone(), mock_id.clone()))
+            .await
+            .unwrap();
+        syncer.next().await;
+    }
+    syncer.next().await;
+
+    // Verify all blocks except the genesis.
+    for i in 1..=first_gossiped_block - 1 {
+        assert_eq!(
+            blockchain1
+                .read()
+                .get_block_at(i as u32 + Policy::genesis_block_number(), true, None)
+                .unwrap(),
+            blocks[(i - 1) as usize]
+        );
+    }
+    assert_eq!(syncer.live_sync.queue().num_buffered_blocks(), 1);
+
+    // Let first missing blocks request be processed.
+    // The reply will result in the blocks for the first request to be discarded
+    // since they have been applied through the block stream.
+    mock_node.next().await;
+    syncer.next().await;
+
+    // Assert that the second missing blocks request is still pending.
+    assert_eq!(
+        blockchain1.read().block_number(),
+        first_gossiped_block as u32 + Policy::genesis_block_number()
+    );
+    assert_eq!(syncer.live_sync.queue().num_buffered_blocks() as u64, 1);
+
+    // Allow the last requests missing blocks to finish.
+    mock_node.next().await;
+    syncer.next().await;
+    syncer.next().await; // To push the buffered block
+
+    assert_eq!(blockchain1.read().head_hash(), blocks[index].hash());
+    assert_eq!(syncer.live_sync.queue().num_buffered_blocks() as u64, 0);
 }
 
 #[test(tokio::test)]
