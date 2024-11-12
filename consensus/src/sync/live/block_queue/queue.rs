@@ -216,24 +216,9 @@ impl<N: Network> BlockQueue<N> {
                 macro_height
             );
             block_source.ignore_block(&self.network);
-        } else if !self.request_component.has_pending_requests()
-            || macro_height == Policy::last_macro_block(block_number)
-        {
-            // We only allow a new request missing blocks to start if the block is from the
-            // current batch or if there are no ongoing request.
-            self.buffer_and_request_missing_blocks(block, block_source);
         } else {
-            // If we are on not within the same batch or we already are requesting blocks,
-            // we just buffer it without requesting for blocks.
-            // Any potential gaps will be filled after we sync up to the batch.
-            if self.insert_block_into_buffer(block, block_source) {
-                log::trace!(block_number, "Buffering block");
-            } else {
-                log::trace!(
-                    block_number,
-                    "Not buffering block - already known or exceeded the per peer limit",
-                );
-            }
+            // Block is inside the buffer window, put it in the buffer.
+            self.buffer_and_request_missing_blocks(block, block_source);
         }
 
         None
