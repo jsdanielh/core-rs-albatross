@@ -209,7 +209,7 @@ impl BlockProducer {
         // Create the micro block header.
         let header = MicroHeader {
             network,
-            version: Policy::VERSION,
+            version: Policy::MAX_SUPPORTED_VERSION,
             block_number,
             timestamp,
             parent_hash,
@@ -331,7 +331,7 @@ impl BlockProducer {
         // state.
         let mut header = MacroHeader {
             network,
-            version: Policy::VERSION,
+            version: Policy::MAX_SUPPORTED_VERSION,
             block_number,
             round,
             timestamp,
