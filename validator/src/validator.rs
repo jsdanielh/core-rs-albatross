@@ -342,6 +342,19 @@ where
                 epoch_number = blockchain.epoch_number(),
                 "We are ACTIVE in this epoch"
             );
+
+            // Find the entry for this validator in the epochs validators.
+            let epoch_validator = validators.get_validator_by_slot_band(slot_band);
+
+            // Compare configured validator voting key to the one in the current epoch to make sure it is the same.
+            if *epoch_validator.voting_key.compressed() != self.voting_key().public_key.compress() {
+                panic!("Invalid validator configuration: Configured voting key does not match voting key in this epoch");
+            }
+
+            // Compare configured validator signing key to the one in the current epoch to make sure it is the same.
+            if epoch_validator.signing_key != self.signing_key().public {
+                panic!("Invalid validator configuration: Configured signing key does not match signing key in this epoch");
+            }
         } else {
             log::debug!(
                 validator_address = %self.validator_address(),
@@ -355,19 +368,6 @@ where
 
         // Set the elected validators of the current epoch in the network as well.
         self.network.set_validators(validators);
-
-        // Check validator configuration
-        if let Some(validator) = self.get_validator(&blockchain) {
-            // Compare configured validator voting key to the one in the contract to make sure it is the same.
-            if validator.voting_key != self.voting_key().public_key.compress() {
-                error!("Invalid validator configuration: Configured voting key does not match voting key in staking contract");
-            }
-
-            // Compare configured validator signing key to the one in the contract to make sure it is the same.
-            if validator.signing_key != self.signing_key().public {
-                error!("Invalid validator configuration: Configured signing key does not match signing key in staking contract");
-            }
-        }
     }
 
     fn init_block_producer(&mut self, head_hash: Option<&Blake2bHash>) {

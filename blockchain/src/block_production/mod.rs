@@ -148,7 +148,7 @@ impl BlockProducer {
         let seed = if skip_block_proof.is_some() {
             // VRF seed of a skip block is carried over since a new VRF seed would require a new
             // leader.
-            prev_seed
+            prev_seed.clone()
         } else {
             prev_seed.sign_next_with_rng(&self.signing_key, block_number, rng)
         };
@@ -227,6 +227,18 @@ impl BlockProducer {
         let justification = if let Some(skip_block_proof) = skip_block_proof {
             MicroJustification::Skip(skip_block_proof)
         } else {
+            // Sanity check the signing key
+            let validators = blockchain
+                .current_validators()
+                .expect("current validators must be accessible.");
+            let epoch_validator = validators.get_validator_by_slot_number(
+                blockchain
+                    .get_proposer(block_number, block_number, prev_seed.entropy(), None)
+                    .expect("should find producer")
+                    .number,
+            );
+            assert_eq!(self.signing_key.public, epoch_validator.signing_key);
+
             // Signs the block header using the signing key.
             let hash = header.hash();
             let signature = self.signing_key.sign(hash.as_slice());

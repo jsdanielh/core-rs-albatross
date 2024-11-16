@@ -405,6 +405,18 @@ where
             id: id.clone(),
         };
 
+        let one_of_our_slots = self
+            .validator_registry
+            .get_slots(self.validator_slot_band)
+            .start;
+
+        let public_key = self
+            .validator_registry
+            .public_key(one_of_our_slots as usize)
+            .expect("Key must be be present");
+
+        assert_eq!(self.block_producer.voting_key.public_key, public_key);
+
         let own_contribution = TendermintContribution::from_vote(
             tendermint_vote,
             &self.block_producer.voting_key.secret_key,
