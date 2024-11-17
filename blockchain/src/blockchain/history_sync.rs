@@ -563,7 +563,7 @@ impl Blockchain {
                 .expect("Failed to find main chain predecessor while reverting blocks");
 
             // Revert the accounts tree. This also reverts the history store.
-            self.revert_accounts(
+            self.revert_accounts_macro(
                 &self.state.accounts,
                 &mut write_txn.into(),
                 &current_info.head,

@@ -1,16 +1,21 @@
 use nimiq_account::{
-    Account, Accounts, BlockLogger, BlockState, RevertInfo, TransactionOperationReceipt,
+    Account, AccountReceipt, Accounts, BlockLogger, BlockState, OperationReceipt, Receipts,
+    RevertInfo, TransactionOperationReceipt, TransactionReceipt,
 };
 use nimiq_block::{Block, BlockError, SkipBlockInfo};
 use nimiq_blockchain_interface::PushError;
 use nimiq_database::{mdbx::MdbxReadTransaction, traits::Database};
-use nimiq_keys::Address;
+use nimiq_genesis::NetworkInfo;
+use nimiq_keys::{Address, KeyPair, PrivateKey, SecureGenerate};
 use nimiq_primitives::{
+    coin::Coin,
     key_nibbles::KeyNibbles,
     trie::{error::IncompleteTrie, trie_diff::TrieDiff, trie_proof::TrieProof},
 };
 use nimiq_serde::Deserialize;
+use nimiq_transaction::{inherent::Inherent, Transaction};
 use nimiq_trie::WriteTransactionProxy;
+use rand::{rngs::StdRng, thread_rng, SeedableRng};
 
 use crate::{interface::HistoryInterface, Blockchain};
 
@@ -135,6 +140,7 @@ impl Blockchain {
 
     /// Reverts the accounts given a block. This only applies to micro blocks and skip blocks, since
     /// macro blocks are final and can't be reverted.
+    /// This does not check if we are reverting across a batch.
     pub(crate) fn revert_accounts(
         &self,
         accounts: &Accounts,
@@ -142,10 +148,6 @@ impl Blockchain {
         block: &Block,
         block_logger: &mut BlockLogger,
     ) -> Result<u64, PushError> {
-        if block.is_macro() {
-            panic!("Can't revert {block} - macro blocks are final");
-        }
-
         let block = block.unwrap_micro_ref();
         let body = block.body.as_ref().unwrap();
 
@@ -198,6 +200,94 @@ impl Blockchain {
         let total_size = self
             .history_store
             .remove_block(txn.raw(), block, inherents)
+            .expect("Failed to remove block from history");
+
+        Ok(total_size)
+    }
+
+    pub(crate) fn revert_accounts_macro(
+        &self,
+        accounts: &Accounts,
+        txn: &mut WriteTransactionProxy,
+        block: &Block,
+        block_logger: &mut BlockLogger,
+    ) -> Result<u64, PushError> {
+        if block.is_micro() {
+            return self.revert_accounts(accounts, txn, block, block_logger);
+        }
+
+        let block = block.unwrap_macro_ref();
+        let body = block.body.as_ref().unwrap();
+
+        debug!(
+            block = %block,
+            is_election = block.is_election(),
+            num_transactions = body.transactions.len(),
+            "Reverting block"
+        );
+
+        // Verify accounts hash if the tree is complete or changes only happened in the complete part.
+        if let Some(accounts_hash) = accounts.get_root_hash(Some(txn)) {
+            assert_eq!(
+                block.header.state_root, accounts_hash,
+                "Cannot revert {} - inconsistent state",
+                block,
+            );
+        }
+
+        let tx_rewards = if let Some(body) = block.body.as_ref() {
+            body.transactions.clone()
+        } else {
+            self.create_reward_transactions(&block.header, &self.get_staking_contract())
+        };
+
+        let mut rng = StdRng::from_rng(thread_rng()).expect("Could not initialize test rng");
+
+        let keypair = KeyPair::generate(&mut rng);
+        let address = Address::from(&keypair.public);
+
+        let inherents = vec![];
+        let mut transactions = vec![];
+        let mut txs = vec![];
+        for tx_reward in tx_rewards {
+            transactions.push(Transaction::new_basic(
+                address.clone(),
+                tx_reward.recipient,
+                tx_reward.value,
+                Coin::ZERO,
+                0,
+                block.network(),
+            ));
+            txs.push(OperationReceipt::Ok(TransactionReceipt {
+                sender_receipt: None,
+                recipient_receipt: None,
+                pruned_account: None,
+            }));
+        }
+
+        let revert_info = RevertInfo::Receipts(Receipts {
+            transactions: txs,
+            inherents: vec![],
+        });
+
+        // Revert the block from AccountsTree.
+        let block_state = BlockState::new(block.block_number(), block.header.timestamp);
+        let result = accounts.revert(
+            txn,
+            &transactions,
+            &inherents,
+            &block_state,
+            revert_info,
+            block_logger,
+        );
+        if let Err(e) = result {
+            panic!("Failed to revert {block} - {e:?}");
+        }
+        accounts.prune(txn, &address);
+
+        let total_size = self
+            .history_store
+            .remove_macro_block(txn.raw(), block, inherents)
             .expect("Failed to remove block from history");
 
         Ok(total_size)
