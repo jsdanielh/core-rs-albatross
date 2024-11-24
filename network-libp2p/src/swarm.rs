@@ -3,10 +3,11 @@ use std::{collections::HashMap, num::NonZeroU8, sync::Arc, time::Duration};
 use futures::StreamExt;
 #[cfg(feature = "metrics")]
 use instant::Instant;
+#[cfg(feature = "autonat")]
+use libp2p::autonat::{self, InboundFailure, OutboundFailure};
 #[cfg(all(target_family = "wasm", not(feature = "tokio-websocket")))]
 use libp2p::websocket_websys;
 use libp2p::{
-    autonat::{self, InboundFailure, OutboundFailure},
     core::{
         self,
         muxing::StreamMuxerBox,
@@ -40,10 +41,11 @@ use nimiq_time::Interval;
 use parking_lot::RwLock;
 use tokio::sync::{broadcast, mpsc};
 
+#[cfg(feature = "autonat")]
+use crate::autonat::NatStatus;
 #[cfg(feature = "metrics")]
 use crate::network_metrics::NetworkMetrics;
 use crate::{
-    autonat::NatStatus,
     behaviour, dht,
     discovery::{self, peer_contacts::PeerContactBook},
     network_types::{
@@ -403,11 +405,13 @@ fn handle_event(event: SwarmEvent<behaviour::BehaviourEvent>, event_info: EventI
                 .behaviour_mut()
                 .discovery
                 .add_own_addresses([address.clone()].to_vec());
+            #[cfg(feature = "autonat")]
             if event_info.swarm.behaviour().is_address_dialable(&address) {
                 event_info.state.nat_status.add_address(address);
             }
         }
 
+        #[cfg(feature = "autonat")]
         SwarmEvent::ListenerClosed {
             listener_id: _,
             addresses,
@@ -418,11 +422,13 @@ fn handle_event(event: SwarmEvent<behaviour::BehaviourEvent>, event_info: EventI
             });
         }
 
+        #[cfg(feature = "autonat")]
         SwarmEvent::ExternalAddrConfirmed { address } => {
             log::trace!(%address, "Address is confirmed and externally reachable");
             event_info.state.nat_status.add_confirmed_address(address);
         }
 
+        #[cfg(feature = "autonat")]
         SwarmEvent::ExternalAddrExpired { address } => {
             log::trace!(%address, "External address is expired and no longer externally reachable");
             event_info
@@ -439,9 +445,11 @@ fn handle_event(event: SwarmEvent<behaviour::BehaviourEvent>, event_info: EventI
 
 fn handle_behaviour_event(event: behaviour::BehaviourEvent, event_info: EventInfo) {
     match event {
+        #[cfg(feature = "autonat")]
         behaviour::BehaviourEvent::AutonatClient(event) => {
             handle_autonat_client_event(event, event_info)
         }
+        #[cfg(feature = "autonat")]
         behaviour::BehaviourEvent::AutonatServer(event) => {
             handle_autonat_server_event(event, event_info)
         }
@@ -458,6 +466,7 @@ fn handle_behaviour_event(event: behaviour::BehaviourEvent, event_info: EventInf
     }
 }
 
+#[cfg(feature = "autonat")]
 fn handle_autonat_client_event(event: autonat::v2::client::Event, event_info: EventInfo) {
     log::trace!(?event, "AutoNAT outbound probe");
     match event.result {
@@ -472,6 +481,7 @@ fn handle_autonat_client_event(event: autonat::v2::client::Event, event_info: Ev
     }
 }
 
+#[cfg(feature = "autonat")]
 fn handle_autonat_server_event(event: autonat::v2::server::Event, _event_info: EventInfo) {
     log::trace!(?event, "AutoNAT inbound probe");
 }
@@ -840,16 +850,22 @@ fn handle_request_response_event(
                 response,
             } => handle_request_response_response(peer_id, request_id, response, event_info),
         },
+        #[cfg(feature = "autonat")]
         request_response::Event::OutboundFailure {
             peer: peer_id,
             request_id,
             error,
         } => handle_request_response_outbound_failure(peer_id, request_id, error, event_info),
+        #[cfg(not(feature = "autonat"))]
+        request_response::Event::OutboundFailure { .. } => {}
+        #[cfg(feature = "autonat")]
         request_response::Event::InboundFailure {
             peer: peer_id,
             request_id,
             error,
         } => handle_request_response_inbound_failure(peer_id, request_id, error, event_info),
+        #[cfg(not(feature = "autonat"))]
+        request_response::Event::InboundFailure { .. } => {}
         request_response::Event::ResponseSent { .. } => {}
     }
 }
@@ -973,6 +989,7 @@ fn handle_request_response_response(
     }
 }
 
+#[cfg(feature = "autonat")]
 fn handle_request_response_outbound_failure(
     peer_id: PeerId,
     request_id: OutboundRequestId,
@@ -991,6 +1008,7 @@ fn handle_request_response_outbound_failure(
     channel.send(Err(to_response_error(error))).ok();
 }
 
+#[cfg(feature = "autonat")]
 fn handle_request_response_inbound_failure(
     peer_id: PeerId,
     request_id: InboundRequestId,
@@ -1240,6 +1258,7 @@ fn perform_action(action: NetworkAction, swarm: &mut NimiqSwarm, state: &mut Tas
     }
 }
 
+#[cfg(feature = "autonat")]
 fn to_response_error(error: OutboundFailure) -> RequestError {
     match error {
         OutboundFailure::ConnectionClosed => {

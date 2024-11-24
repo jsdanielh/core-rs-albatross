@@ -1,7 +1,8 @@
 use std::{iter, sync::Arc};
 
+#[cfg(feature = "autonat")]
+use libp2p::autonat::v2::{self as autonat, client::Config as AutonatConfig};
 use libp2p::{
-    autonat::v2::{self as autonat, client::Config as AutonatConfig},
     connection_limits, gossipsub,
     kad::{self, store::MemoryStore},
     ping, request_response,
@@ -9,6 +10,7 @@ use libp2p::{
     Multiaddr, PeerId, StreamProtocol,
 };
 use parking_lot::RwLock;
+#[cfg(feature = "autonat")]
 use rand::rngs::OsRng;
 
 use crate::{
@@ -35,7 +37,9 @@ pub struct Behaviour {
     pub connection_limits: connection_limits::Behaviour,
     pub pool: connection_pool::Behaviour,
     pub discovery: discovery::Behaviour,
+    #[cfg(feature = "autonat")]
     pub autonat_server: autonat::server::Behaviour,
+    #[cfg(feature = "autonat")]
     pub autonat_client: autonat::client::Behaviour,
     #[cfg(feature = "kad")]
     pub dht: kad::Behaviour<MemoryStore>,
@@ -113,9 +117,11 @@ impl Behaviour {
         );
 
         // AutoNAT server behaviour
+        #[cfg(feature = "autonat")]
         let autonat_server = autonat::server::Behaviour::new(OsRng);
 
         // AutoNAT client behaviour
+        #[cfg(feature = "autonat")]
         let autonat_client = autonat::client::Behaviour::new(OsRng, AutonatConfig::default());
 
         // Connection limits behaviour
@@ -135,7 +141,9 @@ impl Behaviour {
             ping,
             pool,
             request_response,
+            #[cfg(feature = "autonat")]
             autonat_client,
+            #[cfg(feature = "autonat")]
             autonat_server,
             connection_limits,
         }
