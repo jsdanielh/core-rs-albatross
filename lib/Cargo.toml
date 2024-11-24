@@ -97,6 +97,7 @@ full-consensus = [
     "nimiq-blockchain",
     "nimiq-consensus/full",
     "nimiq-dht",
+    "nimiq-network-libp2p/autonat",
     "nimiq-network-libp2p/kad",
 ]
 launcher = []
