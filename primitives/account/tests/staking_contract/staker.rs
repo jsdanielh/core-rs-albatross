@@ -341,13 +341,22 @@ fn add_stake_works() {
         )
         .expect("Failed to commit transaction");
 
-    assert_eq!(receipt, None);
+    assert_eq!(
+        receipt,
+        Some(
+            AddStakeReceipt {
+                credited_balance: BalanceType::Active
+            }
+            .into()
+        )
+    );
     assert_eq!(
         tx_logger.logs,
         vec![Log::Stake {
             staker_address: staker_address.clone(),
             validator_address: Some(validator_address.clone()),
             value: tx.value,
+            credited_balance: BalanceType::Active,
         }]
     );
 
@@ -387,7 +396,7 @@ fn add_stake_works() {
         .revert_incoming_transaction(
             &tx,
             &block_state,
-            None,
+            receipt,
             data_store.write(&mut db_txn),
             &mut tx_logger,
         )
@@ -399,6 +408,7 @@ fn add_stake_works() {
             staker_address: staker_address.clone(),
             validator_address: Some(validator_address.clone()),
             value: tx.value,
+            credited_balance: BalanceType::Active,
         }]
     );
 
@@ -495,14 +505,23 @@ fn add_stake_enforces_minimum_stake() {
         )
         .expect("Failed to commit transaction");
 
-    assert_eq!(receipt, None);
+    assert_eq!(
+        receipt,
+        Some(
+            AddStakeReceipt {
+                credited_balance: BalanceType::Retired
+            }
+            .into()
+        )
+    );
 
     assert_eq!(
         tx_logs.logs,
         vec![Log::Stake {
             staker_address: staker_setup.staker_address.clone(),
             validator_address: Some(staker_setup.validator_address.clone()),
-            value: Coin::from_u64_unchecked(Policy::MINIMUM_STAKE)
+            value: Coin::from_u64_unchecked(Policy::MINIMUM_STAKE),
+            credited_balance: BalanceType::Retired,
         }]
     );
 
@@ -512,9 +531,10 @@ fn add_stake_enforces_minimum_stake() {
         .expect("Staker should exist");
 
     assert_eq!(
-        staker.active_balance,
-        Coin::from_u64_unchecked(Policy::MINIMUM_STAKE)
+        staker.retired_balance,
+        Coin::from_u64_unchecked(Policy::MINIMUM_STAKE + 50_000_000),
     );
+    assert_eq!(staker.active_balance, Coin::ZERO,);
     assert_eq!(staker.inactive_balance, Coin::ZERO);
     assert_eq!(staker.inactive_from, None);
 
@@ -526,7 +546,7 @@ fn add_stake_enforces_minimum_stake() {
     assert_eq!(validator.num_stakers, 1);
     assert_eq!(
         validator.total_stake,
-        Coin::from_u64_unchecked(Policy::VALIDATOR_DEPOSIT + Policy::MINIMUM_STAKE)
+        Coin::from_u64_unchecked(Policy::VALIDATOR_DEPOSIT)
     );
 }
 

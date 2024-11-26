@@ -9,6 +9,8 @@ use nimiq_primitives::coin::Coin;
 use nimiq_primitives::policy::Policy;
 use serde::{Deserialize, Serialize};
 
+use super::AddStakeReceipt;
+use crate::BalanceType;
 #[cfg(feature = "interaction-traits")]
 use crate::{
     account::staking_contract::{
@@ -283,7 +285,7 @@ impl StakingContract {
         staker_address: &Address,
         value: Coin,
         tx_logger: &mut TransactionLog,
-    ) -> Result<(), AccountError> {
+    ) -> Result<AddStakeReceipt, AccountError> {
         // Get the staker.
         let mut staker = store.expect_staker(staker_address)?;
 
@@ -296,28 +298,48 @@ impl StakingContract {
 
         // All checks passed, not allowed to fail from here on!
 
-        // If we are delegating to a validator, we need to update it.
-        if let Some(validator_address) = &staker.delegation {
-            // Check that the delegation is still valid, i.e. the validator hasn't been deleted.
-            store.expect_validator(validator_address)?;
-            self.increase_stake_to_validator(store, validator_address, value);
-        }
-
+        // Create the receipt.
         // Update the staker's and staking contract's balances.
-        staker.active_balance += value;
+        // We want to credit the active balance only if it's the bigger of the non retired balance.
+        // Otherwise we chose the balance with the most funds between inactive and retired.
+        let credited_balance;
+        if staker.active_balance > staker.inactive_balance {
+            staker.active_balance += value;
+            credited_balance = BalanceType::Active;
+        } else if staker.inactive_balance > staker.retired_balance {
+            staker.inactive_balance += value;
+            credited_balance = BalanceType::Inactive;
+        } else {
+            staker.retired_balance += value;
+            credited_balance = BalanceType::Retired;
+        }
         self.balance += value;
+
+        let receipt = AddStakeReceipt {
+            credited_balance: credited_balance.clone(),
+        };
+
+        if credited_balance == BalanceType::Active {
+            // If we are delegating to a validator, we need to update it.
+            if let Some(validator_address) = &staker.delegation {
+                // Check that the delegation is still valid, i.e. the validator hasn't been deleted.
+                store.expect_validator(validator_address)?;
+                self.increase_stake_to_validator(store, validator_address, value);
+            }
+        }
 
         // Build the return logs
         tx_logger.push_log(Log::Stake {
             staker_address: staker_address.clone(),
             validator_address: staker.delegation.clone(),
             value,
+            credited_balance,
         });
 
         // Update the staker entry.
         store.put_staker(staker_address, staker);
 
-        Ok(())
+        Ok(receipt)
     }
 
     /// Reverts a stake transaction.
@@ -326,24 +348,38 @@ impl StakingContract {
         store: &mut StakingContractStoreWrite,
         staker_address: &Address,
         value: Coin,
+        receipt: AddStakeReceipt,
         tx_logger: &mut TransactionLog,
     ) -> Result<(), AccountError> {
         // Get the staker.
         let mut staker = store.expect_staker(staker_address)?;
 
         // If we are delegating to a validator, we need to update it too.
-        if let Some(validator_address) = &staker.delegation {
-            self.decrease_stake_from_validator(store, validator_address, value);
+        if receipt.credited_balance == BalanceType::Active {
+            if let Some(validator_address) = &staker.delegation {
+                self.decrease_stake_from_validator(store, validator_address, value);
+            }
         }
 
         // Update the staker's and staking contract's balances.
-        staker.active_balance -= value;
+        match receipt.credited_balance {
+            BalanceType::Active => {
+                staker.active_balance -= value;
+            }
+            BalanceType::Inactive => {
+                staker.inactive_balance -= value;
+            }
+            BalanceType::Retired => {
+                staker.retired_balance -= value;
+            }
+        }
         self.balance -= value;
 
         tx_logger.push_log(Log::Stake {
             staker_address: staker_address.clone(),
             validator_address: staker.delegation.clone(),
             value,
+            credited_balance: receipt.credited_balance,
         });
 
         // Update the staker entry.
