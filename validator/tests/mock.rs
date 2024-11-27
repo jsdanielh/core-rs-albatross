@@ -248,14 +248,14 @@ async fn validator_can_catch_up() {
             .network
             .disconnect(CloseReason::GoingOffline)
             .await;
-        let id1 = validator.validator_slot_band();
+        let id1 = validator.state().read().slot_band.expect("elected");
         let validator = validator_for_slot(&mut validators, 2, 2);
         validator
             .consensus
             .network
             .disconnect(CloseReason::GoingOffline)
             .await;
-        let id2 = validator.validator_slot_band();
+        let id2 = validator.state().read().slot_band.expect("elected");
         assert_ne!(id2, id1);
 
         // ideally we would remove the validators from the vec for them to not even execute.
@@ -271,8 +271,8 @@ async fn validator_can_catch_up() {
             .network
             .disconnect(CloseReason::GoingOffline)
             .await;
-        assert_ne!(id1, validator.validator_slot_band());
-        assert_ne!(id2, validator.validator_slot_band());
+        assert_ne!(id1, validator.state().read().slot_band.expect("elected"));
+        assert_ne!(id2, validator.state().read().slot_band.expect("elected"));
         (validator, validator.consensus.network.clone())
     };
     // assert_eq!(validators.len(), 7);
@@ -282,7 +282,7 @@ async fn validator_can_catch_up() {
     let mut events = blockchain.read().notifier_as_stream();
 
     let slots: Vec<_> = blockchain.read().current_validators().unwrap().validators
-        [validator.validator_slot_band() as usize]
+        [validator.state().read().slot_band.expect("elected") as usize]
         .slots
         .clone()
         .collect();
@@ -296,8 +296,8 @@ async fn validator_can_catch_up() {
     // Manually construct a skip block for the validator
     let vc = create_skip_block_update(
         skip_block_info,
-        validator.current_voting_key(),
-        validator.validator_slot_band(),
+        validator.state().read().voting_keys.get_current_key(),
+        validator.state().read().slot_band.expect("elected"),
         &slots,
     );
 
