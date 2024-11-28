@@ -15,7 +15,7 @@ use nimiq_network_interface::{
 };
 use nimiq_network_libp2p::Network;
 use nimiq_network_mock::{MockHub, MockNetwork};
-use nimiq_primitives::{networks::NetworkId, policy::Policy};
+use nimiq_primitives::{coin::Coin, networks::NetworkId, policy::Policy};
 use nimiq_test_log::test;
 use nimiq_test_utils::{
     test_network::TestNetwork,
@@ -24,9 +24,11 @@ use nimiq_test_utils::{
     },
 };
 use nimiq_time::{sleep, timeout};
+use nimiq_transaction_builder::TransactionBuilder;
 use nimiq_utils::spawn;
-use nimiq_validator::aggregation::{
-    skip_block::SignedSkipBlockMessage, update::SerializableLevelUpdate,
+use nimiq_validator::{
+    aggregation::{skip_block::SignedSkipBlockMessage, update::SerializableLevelUpdate},
+    validator::ValidatorHealth,
 };
 use serde::{Deserialize, Serialize};
 
@@ -174,6 +176,207 @@ async fn validators_can_do_skip_block() {
 
     assert!(block.is_skip());
     assert!(block.block_number() > Policy::genesis_block_number());
+}
+
+#[test(tokio::test)]
+async fn validator_can_recover_from_yellow_health() {
+    let env =
+        MdbxDatabase::new_volatile(Default::default()).expect("Could not open a volatile database");
+
+    let validators =
+        build_validators::<Network>(env, &(5u64..=10u64).collect::<Vec<_>>(), &mut None, false)
+            .await;
+
+    // Listen for blockchain events from the new block producer (after a skip block).
+    let validator = validators.first().unwrap();
+    let validator_proxy = validator.proxy();
+
+    let validator = validators.last().unwrap();
+    let blockchain = Arc::clone(&validator.blockchain);
+    let events = blockchain.read().notifier_as_stream();
+
+    for validator in validators {
+        log::info!("Spawning validator: {}", validator.validator_address());
+        spawn(validator);
+    }
+
+    validator_proxy.validator_health.write().publish = false;
+
+    events.take(10).for_each(|_| future::ready(())).await;
+
+    let current_validator_health = validator_proxy.validator_health.read().health;
+
+    match current_validator_health {
+        ValidatorHealth::Yellow(block_number) => {
+            log::info!(
+                "Current validator health is yellow, as expected, inactivated block {}",
+                block_number
+            )
+        }
+        _ => panic!("Validator Health different than expected"),
+    };
+
+    // The validator should no longer be skip blocked:
+    validator_proxy.validator_health.write().publish = true;
+
+    let events = blockchain.read().notifier_as_stream();
+    events.take(30).for_each(|_| future::ready(())).await;
+
+    assert_eq!(
+        validator_proxy.validator_health.read().health,
+        ValidatorHealth::Green
+    );
+}
+
+#[test(tokio::test)]
+async fn validator_health_to_red() {
+    let env =
+        MdbxDatabase::new_volatile(Default::default()).expect("Could not open a volatile database");
+
+    let validators =
+        build_validators::<Network>(env, &(5u64..=10u64).collect::<Vec<_>>(), &mut None, false)
+            .await;
+
+    // Listen for blockchain events from the new block producer (after a skip block).
+    let validator = validators.first().unwrap();
+    let validator_proxy = validator.proxy();
+
+    let validator = validators.last().unwrap();
+    let blockchain = Arc::clone(&validator.blockchain);
+    let events = blockchain.read().notifier_as_stream();
+
+    for validator in validators {
+        log::info!("Spawning validator: {}", validator.validator_address());
+        spawn(validator);
+    }
+
+    validator_proxy.validator_health.write().publish = false;
+
+    events.take(10).for_each(|_| future::ready(())).await;
+
+    let current_validator_health = validator_proxy.validator_health.read().health;
+
+    match current_validator_health {
+        ValidatorHealth::Yellow(block_number) => {
+            log::info!(
+                "Current validator health is yellow, as expected, inactivated block {}",
+                block_number
+            )
+        }
+        _ => panic!("Validator Health different than expected"),
+    };
+
+    let events = blockchain.read().notifier_as_stream();
+
+    // Now we produce more blocks, and the validator should be inactivated again
+    events.take(20).for_each(|_| future::ready(())).await;
+
+    let current_validator_health = validator_proxy.validator_health.read().health;
+
+    match current_validator_health {
+        ValidatorHealth::Red(block_number) => {
+            log::info!(
+                "Current validator health is red, as expected, inactivated block {}",
+                block_number
+            )
+        }
+        _ => panic!("Validator Health different than expected"),
+    };
+}
+
+#[test(tokio::test)]
+async fn validator_health_fully_recover() {
+    let env =
+        MdbxDatabase::new_volatile(Default::default()).expect("Could not open a volatile database");
+
+    let validators =
+        build_validators::<Network>(env, &(5u64..=10u64).collect::<Vec<_>>(), &mut None, false)
+            .await;
+
+    // Listen for blockchain events from the new block producer (after a skip block).
+    let validator = validators.first().unwrap();
+    let consensus = validator.consensus.clone();
+    let validator_proxy = validator.proxy();
+    let validator_address = validator.validator_address();
+
+    log::info!(
+        "Listening to blockchain events from validator {} ",
+        validator_address,
+    );
+
+    let validator = validators.last().unwrap();
+    let blockchain = Arc::clone(&validator.blockchain);
+
+    let events = blockchain.read().notifier_as_stream();
+
+    for validator in validators {
+        log::info!("Spawning validator: {}", validator.validator_address());
+        spawn(validator);
+    }
+
+    validator_proxy.validator_health.write().publish = false;
+
+    events.take(10).for_each(|_| future::ready(())).await;
+
+    let current_validator_health = validator_proxy.validator_health.read().health;
+
+    match current_validator_health {
+        ValidatorHealth::Yellow(block_number) => {
+            log::info!(
+                "Current validator health is yellow, as expected, inactivated block {}",
+                block_number
+            )
+        }
+        _ => panic!("Validator Health different than expected"),
+    };
+
+    let events = blockchain.read().notifier_as_stream();
+
+    // Now we produce more blocks, and the validator should be inactivated again
+    events.take(20).for_each(|_| future::ready(())).await;
+
+    let current_validator_health = validator_proxy.validator_health.read().health;
+
+    match current_validator_health {
+        ValidatorHealth::Red(block_number) => {
+            log::info!(
+                "Current validator health is red, as expected, inactivated block {}",
+                block_number
+            )
+        }
+        _ => panic!("Validator Health different than expected"),
+    };
+
+    // Since the validator needs manual intervention, we are going to send the reactivate transaction
+
+    let reactivate_transaction = TransactionBuilder::new_reactivate_validator(
+        &validator_proxy.fee_key.read(),
+        validator_address,
+        &validator_proxy.signing_key.read(),
+        Coin::ZERO,
+        Policy::genesis_block_number(),
+        NetworkId::UnitAlbatross,
+    );
+
+    spawn(async move {
+        log::info!("Sending reactivate transaction to the network");
+        if consensus
+            .send_transaction(reactivate_transaction.clone())
+            .await
+            .is_err()
+        {
+            log::error!("Failed to send reactivate transaction");
+        }
+    });
+
+    validator_proxy.validator_health.write().publish = true;
+
+    let events = blockchain.read().notifier_as_stream();
+    events.take(70).for_each(|_| future::ready(())).await;
+
+    let current_validator_health = validator_proxy.validator_health.read().health;
+
+    assert_eq!(current_validator_health, ValidatorHealth::Green);
 }
 
 fn create_skip_block_update(

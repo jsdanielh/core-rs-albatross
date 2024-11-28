@@ -10,6 +10,7 @@ use futures::{future::BoxFuture, ready, FutureExt, Stream};
 use nimiq_block::{Block, EquivocationProof, MicroBlock, SkipBlockInfo};
 use nimiq_blockchain::{BlockProducer, BlockProducerError, Blockchain};
 use nimiq_blockchain_interface::AbstractBlockchain;
+use nimiq_keys::Address;
 use nimiq_mempool::mempool::Mempool;
 use nimiq_primitives::policy::Policy;
 use nimiq_time::sleep;
@@ -36,6 +37,8 @@ struct NextProduceMicroBlockEvent<TValidatorNetwork> {
     block_number: u32,
     producer_timeout: Duration,
     block_separation_time: Duration,
+    validator_address: Address,
+    publish_block: bool,
 }
 
 impl<TValidatorNetwork: ValidatorNetwork + 'static> NextProduceMicroBlockEvent<TValidatorNetwork> {
@@ -53,6 +56,8 @@ impl<TValidatorNetwork: ValidatorNetwork + 'static> NextProduceMicroBlockEvent<T
         block_number: u32,
         producer_timeout: Duration,
         block_separation_time: Duration,
+        validator_address: Address,
+        publish_block: bool,
     ) -> Self {
         Self {
             blockchain,
@@ -65,6 +70,8 @@ impl<TValidatorNetwork: ValidatorNetwork + 'static> NextProduceMicroBlockEvent<T
             block_number,
             producer_timeout,
             block_separation_time,
+            validator_address,
+            publish_block,
         }
     }
 
@@ -117,6 +124,7 @@ impl<TValidatorNetwork: ValidatorNetwork + 'static> NextProduceMicroBlockEvent<T
             info!(
                 block_number = self.block_number,
                 slot_band = self.validator_slot_band,
+                address = %self.validator_address,
                 "Our turn, producing micro block #{}",
                 self.block_number,
             );
@@ -152,6 +160,12 @@ impl<TValidatorNetwork: ValidatorNetwork + 'static> NextProduceMicroBlockEvent<T
                 block,
                 num_transactions
             );
+
+            if !self.publish_block {
+                log::warn!("Not publishing block {} ", block.block_number());
+                let event = ProduceMicroBlockEvent::MicroBlock;
+                break Some(Some(event));
+            }
 
             // Publish the block. It is valid as we have just created it.
             Validator::publish_block(Arc::clone(&self.network), block.clone());
@@ -194,6 +208,7 @@ impl<TValidatorNetwork: ValidatorNetwork + 'static> NextProduceMicroBlockEvent<T
         debug!(
             block_number = self.block_number,
             slot_band = self.validator_slot_band,
+            address = %self.validator_address,
             "Not our turn, waiting for micro block #{}",
             self.block_number,
         );
@@ -404,6 +419,8 @@ impl<TValidatorNetwork: ValidatorNetwork + 'static> ProduceMicroBlock<TValidator
         block_number: u32,
         producer_timeout: Duration,
         block_separation_time: Duration,
+        validator_address: Address,
+        publish_block: bool,
     ) -> Self {
         let next_event = NextProduceMicroBlockEvent::new(
             blockchain,
@@ -416,6 +433,8 @@ impl<TValidatorNetwork: ValidatorNetwork + 'static> ProduceMicroBlock<TValidator
             block_number,
             producer_timeout,
             block_separation_time,
+            validator_address,
+            publish_block,
         )
         .next()
         .boxed();

@@ -113,7 +113,7 @@ where
         let (v, c) = build_validator(
             peer_ids[i],
             Address::from(&validator_keys[i]),
-            false,
+            true,
             signing_keys[i].clone(),
             voting_keys[i].clone(),
             fee_keys[i].clone(),

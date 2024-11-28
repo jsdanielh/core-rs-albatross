@@ -46,6 +46,12 @@ use crate::{
 ///      in the first place.
 /// (**) The validator may be set to automatically reactivate itself upon inactivation.
 ///      If this setting is not enabled the state change can only be triggered manually.
+///      However, there is a validator health status with the following states:
+///      -> Green: Everything is working as expected, if the validator is deactivated its status changes to Yellow
+///      -> Yellow: If the validator is deactivated again, its status is changed to Red
+///      -> Red: If the validator is deactivated again, the automatic reactivate (if enabled) has no effect
+///              Human intervention is required at this point
+///      To go from Red to Yellow or Yellow to Green, the validator needs to be active for at least a quarter of an epoch
 ///
 /// Create, Update, Deactivate, Retire and Re-activate are incoming transactions to the staking contract.
 /// Delete is an outgoing transaction from the staking contract.

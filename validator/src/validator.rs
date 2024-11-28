@@ -62,6 +62,28 @@ pub struct ConsensusState {
     equivocation_proofs: EquivocationProofPool,
 }
 
+/// Struct that represents the overall health of a validator
+/// Green means the Validator is working as expected,
+/// If the validator is deactivated, we change its health to Yellow
+/// If the validator is Yellow and it is deactivated again, we change its health to Red
+/// While in the Red state, the automatic reactivate has no effect and human intervention is required
+/// If the validator is Yellow and is not deactivated in a quarter of an epoch, we change its status to Green.
+/// If the validator is Red and is not deactivated in one epoch, we change its status to Yellow.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ValidatorHealth {
+    Green,
+    Yellow(u32),
+    Red(u32),
+}
+
+/// Struct that represents the overall Validator Health
+pub struct HealthState {
+    /// The current validator health
+    pub health: ValidatorHealth,
+    /// For testing/debug purposes control wether produced blocks are published by the validator
+    pub publish: bool,
+}
+
 /// Validator inactivity
 struct InactivityState {
     inactive_tx_hash: Blake2bHash,
@@ -76,6 +98,7 @@ pub struct ValidatorProxy {
     pub automatic_reactivate: Arc<AtomicBool>,
     pub slot_band: Arc<RwLock<Option<u16>>>,
     pub consensus_state: Arc<RwLock<ConsensusState>>,
+    pub validator_health: Arc<RwLock<HealthState>>,
 }
 
 impl Clone for ValidatorProxy {
@@ -88,6 +111,7 @@ impl Clone for ValidatorProxy {
             automatic_reactivate: Arc::clone(&self.automatic_reactivate),
             slot_band: Arc::clone(&self.slot_band),
             consensus_state: Arc::clone(&self.consensus_state),
+            validator_health: Arc::clone(&self.validator_health),
         }
     }
 }
@@ -119,6 +143,8 @@ where
     slot_band: Arc<RwLock<Option<u16>>>,
     consensus_state: Arc<RwLock<ConsensusState>>,
     validator_state: Option<InactivityState>,
+    health_state: Arc<RwLock<HealthState>>,
+
     automatic_reactivate: Arc<AtomicBool>,
 
     macro_producer: Option<ProduceMacroBlock<TValidatorNetwork>>,
@@ -200,6 +226,11 @@ where
                 .await
         });
 
+        let health_state = HealthState {
+            health: ValidatorHealth::Green,
+            publish: true,
+        };
+
         Self {
             consensus: consensus.proxy(),
             blockchain,
@@ -222,6 +253,8 @@ where
             slot_band: Arc::new(RwLock::new(None)),
             consensus_state: Arc::new(RwLock::new(blockchain_state)),
             validator_state: None,
+            health_state: Arc::new(RwLock::new(health_state)),
+
             automatic_reactivate,
 
             macro_producer: None,
@@ -448,6 +481,8 @@ where
                     next_block_number,
                     Self::compute_micro_block_producer_timeout(head, &blockchain),
                     Self::BLOCK_SEPARATION_TIME,
+                    self.validator_address.read().clone(),
+                    self.health_state.read().publish,
                 ));
             }
         }
@@ -737,6 +772,7 @@ where
             automatic_reactivate: Arc::clone(&self.automatic_reactivate),
             slot_band: Arc::clone(&self.slot_band),
             consensus_state: Arc::clone(&self.consensus_state),
+            validator_health: Arc::clone(&self.health_state),
         }
     }
 
@@ -833,12 +869,43 @@ where
         // Once the validator can be active is established, check the validator staking state.
         if self.is_synced() {
             let blockchain = self.blockchain.read();
+            let block_number = blockchain.block_number();
             match self.get_staking_state(&blockchain) {
                 ValidatorStakingState::Active => {
                     drop(blockchain);
                     if self.validator_state.is_some() {
                         self.validator_state = None;
                         info!("Automatically reactivated.");
+                    }
+
+                    let validator_health = self.health_state.read().health;
+                    match validator_health {
+                        ValidatorHealth::Green => {}
+                        ValidatorHealth::Yellow(yellow_block_number) => {
+                            let blocks_diff = block_number - yellow_block_number;
+                            debug!(
+                                "Current validator health {} is yellow, blocks diff: {} ",
+                                self.validator_address.read(),
+                                blocks_diff
+                            );
+                            if blocks_diff >= Policy::blocks_per_epoch() / 4 {
+                                log::info!("Changing the validator health back to green");
+                                self.health_state.write().health = ValidatorHealth::Green;
+                            }
+                        }
+                        ValidatorHealth::Red(red_block_number) => {
+                            let blocks_diff = block_number - red_block_number;
+                            debug!(
+                                "Current validator health {} is red, blocks diff: {} ",
+                                self.validator_address.read(),
+                                blocks_diff
+                            );
+                            if blocks_diff >= Policy::blocks_per_epoch() / 4 {
+                                log::info!("Changing the validator health back to yellow");
+                                self.health_state.write().health =
+                                    ValidatorHealth::Yellow(block_number);
+                            }
+                        }
                     }
                 }
                 ValidatorStakingState::Inactive(jailed_from) => {
@@ -850,9 +917,36 @@ where
                             .unwrap_or(true)
                         && self.automatic_reactivate.load(Ordering::Acquire)
                     {
-                        let inactivity_state = self.reactivate(&blockchain);
-                        drop(blockchain);
-                        self.validator_state = Some(inactivity_state);
+                        let validator_health = self.health_state.read().health;
+                        match validator_health {
+                            ValidatorHealth::Green => {
+                                log::warn!(
+                                    "The validator {} was inactivated, changing its health to Yellow",
+                                    self.validator_address.read()
+                                );
+                                let inactivity_state = self.reactivate(&blockchain);
+                                drop(blockchain);
+                                self.validator_state = Some(inactivity_state);
+                                self.health_state.write().health =
+                                    ValidatorHealth::Yellow(block_number);
+                            }
+                            ValidatorHealth::Yellow(_) => {
+                                log::warn!(
+                                    "The validator {} was inactivated again, changing its health to Red",
+                                    self.validator_address.read()
+                                );
+                                let inactivity_state = self.reactivate(&blockchain);
+                                drop(blockchain);
+                                self.validator_state = Some(inactivity_state);
+                                self.health_state.write().health =
+                                    ValidatorHealth::Red(block_number);
+                            }
+                            ValidatorHealth::Red(_) => {
+                                log::warn!(
+                                    "The validator needs human intervention, no automatic reactivate"
+                                );
+                            }
+                        }
                     }
                 }
                 ValidatorStakingState::UnknownOrNoStake => {}
