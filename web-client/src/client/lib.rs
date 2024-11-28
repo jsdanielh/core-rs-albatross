@@ -20,7 +20,9 @@ pub use nimiq::{
     },
     extras::{panic::initialize_panic_reporting, web_logging::initialize_web_logging},
 };
+use nimiq_block::Block;
 use nimiq_blockchain_interface::{AbstractBlockchain, BlockchainEvent};
+use nimiq_bls::LazyPublicKey;
 use nimiq_consensus::ConsensusEvent;
 use nimiq_hash::Blake2bHash;
 use nimiq_network_interface::{
@@ -43,6 +45,7 @@ use crate::{
             PlainValidatorType,
         },
         block::{PlainBlock, PlainBlockType},
+        bls_cache::BlsCache,
         peer_info::{PlainPeerInfo, PlainPeerInfoArrayType},
     },
     common::{
@@ -113,6 +116,8 @@ pub struct Client {
     /// Map from transaction hash as hex string to oneshot sender.
     /// Used to await transaction events in `send_transaction`.
     transaction_oneshots: Rc<RefCell<HashMap<String, oneshot::Sender<PlainTransactionDetails>>>>,
+
+    bls_cache: Rc<RefCell<BlsCache>>,
 }
 
 #[wasm_bindgen]
@@ -182,6 +187,8 @@ impl Client {
         let zkp_component = client.take_zkp_component().unwrap();
         spawn_local(zkp_component);
 
+        let bls_cache = BlsCache::new().await;
+
         let client = Client {
             inner: client,
             network_id: from_network_id(web_config.network_id),
@@ -192,6 +199,7 @@ impl Client {
             peer_changed_listeners: Rc::new(RefCell::new(HashMap::with_capacity(1))),
             transaction_listeners: Rc::new(RefCell::new(HashMap::new())),
             transaction_oneshots: Rc::new(RefCell::new(HashMap::new())),
+            bls_cache: Rc::new(RefCell::new(bls_cache)),
         };
 
         client.setup_offline_online_event_handlers();
@@ -199,6 +207,10 @@ impl Client {
         client.setup_blockchain_events();
         client.setup_network_events();
         client.setup_transaction_events().await;
+
+        if let Err(err) = client.bls_cache.borrow_mut().init().await {
+            log::warn!("Failed loading bls cache {}", err);
+        }
 
         Ok(client)
     }
@@ -1039,34 +1051,23 @@ impl Client {
         let mut blockchain_events = blockchain.read().notifier_as_stream();
 
         let block_listeners = Rc::clone(&self.head_changed_listeners);
+        let bls_cache = Rc::clone(&self.bls_cache);
 
         spawn_local(async move {
             loop {
-                let (hash, reason, reverted_blocks, adopted_blocks) =
+                let (hash, reason, reverted_blocks, adopted_blocks_hashs) =
                     match blockchain_events.next().await {
                         Some(BlockchainEvent::Extended(hash)) => {
-                            let adopted_blocks = Array::new();
-                            adopted_blocks.push(&hash.to_hex().into());
-
-                            (hash, "extended", Array::new(), adopted_blocks)
+                            (hash.clone(), "extended", Array::new(), vec![hash])
                         }
                         Some(BlockchainEvent::HistoryAdopted(hash)) => {
-                            let adopted_blocks = Array::new();
-                            adopted_blocks.push(&hash.to_hex().into());
-
-                            (hash, "history-adopted", Array::new(), adopted_blocks)
+                            (hash.clone(), "history-adopted", Array::new(), vec![hash])
                         }
                         Some(BlockchainEvent::EpochFinalized(hash)) => {
-                            let adopted_blocks = Array::new();
-                            adopted_blocks.push(&hash.to_hex().into());
-
-                            (hash, "epoch-finalized", Array::new(), adopted_blocks)
+                            (hash.clone(), "epoch-finalized", Array::new(), vec![hash])
                         }
                         Some(BlockchainEvent::Finalized(hash)) => {
-                            let adopted_blocks = Array::new();
-                            adopted_blocks.push(&hash.to_hex().into());
-
-                            (hash, "finalized", Array::new(), adopted_blocks)
+                            (hash.clone(), "finalized", Array::new(), vec![hash])
                         }
                         Some(BlockchainEvent::Rebranched(old_chain, new_chain)) => {
                             let hash = &new_chain.last().unwrap().0.clone();
@@ -1076,9 +1077,9 @@ impl Client {
                                 reverted_blocks.push(&h.to_hex().into());
                             }
 
-                            let adopted_blocks = Array::new();
+                            let mut adopted_blocks = Vec::new();
                             for (h, _) in new_chain {
-                                adopted_blocks.push(&h.to_hex().into());
+                                adopted_blocks.push(h);
                             }
 
                             (
@@ -1089,22 +1090,44 @@ impl Client {
                             )
                         }
                         Some(BlockchainEvent::Stored(block)) => {
-                            (block.hash(), "stored", Array::new(), Array::new())
+                            (block.hash(), "stored", Array::new(), Vec::new())
                         }
                         None => {
                             break;
                         }
                     };
 
+                let adopted_blocks = Array::new();
+                for hash in &adopted_blocks_hashs {
+                    adopted_blocks.push(&hash.to_hex().into());
+                }
+
                 let args = Array::new();
                 args.push(&hash.to_hex().into());
                 args.push(&reason.into());
                 args.push(&reverted_blocks);
-                args.push(&adopted_blocks);
+                args.push(&adopted_blocks.clone());
 
                 let this = JsValue::null();
                 for listener in block_listeners.borrow().values() {
                     let _ = listener.apply(&this, &args);
+                }
+
+                // Cache decompressed validator bls keys
+                for hash in &adopted_blocks_hashs {
+                    if let Ok(Block::Macro(macro_block)) = blockchain.read().get_block(hash, false)
+                    {
+                        if let Some(validators) = macro_block.header.validators {
+                            let bls_keys = validators
+                                .validators
+                                .iter()
+                                .map(|validator| validator.voting_key.clone())
+                                .collect::<Vec<LazyPublicKey>>();
+                            if let Err(err) = bls_cache.borrow_mut().add_keys(bls_keys).await {
+                                log::warn!("Failed caching bls keys {}", err);
+                            }
+                        }
+                    }
                 }
             }
         });
