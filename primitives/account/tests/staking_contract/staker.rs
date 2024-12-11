@@ -1,7 +1,9 @@
 use nimiq_account::*;
 use nimiq_database::{mdbx::MdbxDatabase, traits::Database};
 use nimiq_keys::Address;
-use nimiq_primitives::{account::AccountError, coin::Coin, policy::Policy};
+use nimiq_primitives::{
+    account::AccountError, coin::Coin, policy::Policy, transaction::TransactionError,
+};
 use nimiq_test_log::test;
 use nimiq_transaction::{
     account::staking_contract::{IncomingStakingTransactionData, OutgoingStakingTransactionData},
@@ -473,16 +475,9 @@ fn add_stake_enforces_minimum_stake() {
         Policy::MINIMUM_STAKE - 1,
         &staker_keypair,
     );
-
-    let mut tx_logs = TransactionLog::empty();
     assert_eq!(
-        staker_setup.staking_contract.commit_incoming_transaction(
-            &tx,
-            &staker_setup.before_release_block_state,
-            data_store.write(&mut db_txn),
-            &mut tx_logs,
-        ),
-        Err(AccountError::InvalidCoinValue)
+        tx.verify(NetworkId::UnitAlbatross),
+        Err(TransactionError::InvalidValue)
     );
 
     // Can add in the valid case.

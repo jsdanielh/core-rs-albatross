@@ -289,12 +289,17 @@ impl StakingContract {
         // Get the staker.
         let mut staker = store.expect_staker(staker_address)?;
 
-        // Fail if the minimum stake would be violated for the non-retired funds (invariant 1).
-        Staker::enforce_min_stake(
-            staker.active_balance + value,
-            staker.inactive_balance,
-            staker.retired_balance,
-        )?;
+        // Add stake txs never violate minimum stake for the non-retired funds (invariant 1),
+        // because the intrinsic tx checks that value is >= min stake.
+        assert!(
+            Staker::enforce_min_stake(
+                staker.active_balance + value,
+                staker.inactive_balance,
+                staker.retired_balance,
+            )
+            .is_ok(),
+            "Add stake should never violate the min stake invariants"
+        );
 
         // All checks passed, not allowed to fail from here on!
 

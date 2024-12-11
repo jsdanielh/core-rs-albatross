@@ -176,10 +176,10 @@ impl IncomingStakingTransactionData {
                 verify_transaction_signature(transaction, proof)?
             }
             IncomingStakingTransactionData::AddStake { .. } => {
-                // Adding stake should be at least greater than 0.
-                if transaction.value.is_zero() {
-                    warn!("Add stake transactions must have positive value. The offending transaction is the following:\n{:?}", transaction);
-                    return Err(TransactionError::ZeroValue);
+                // Adding stake should be greater than 0.
+                if transaction.value < Coin::from_u64_unchecked(Policy::MINIMUM_STAKE) {
+                    warn!("Add stake must increment stake by at least minimum stake. The offending transaction is the following:\n{:?}", transaction);
+                    return Err(TransactionError::InvalidValue);
                 }
 
                 // No more checks needed.
