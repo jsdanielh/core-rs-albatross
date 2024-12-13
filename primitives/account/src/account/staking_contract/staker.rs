@@ -303,23 +303,22 @@ impl StakingContract {
 
         // All checks passed, not allowed to fail from here on!
 
-        // Create the receipt.
         // Update the staker's and staking contract's balances.
-        // We want to credit the active balance only if it's the bigger of the non retired balance.
-        // Otherwise we chose the balance with the most funds between inactive and retired.
-        let credited_balance;
-        if staker.active_balance > staker.inactive_balance {
+        // We want to preferentially credit the active balance. Only if there is no active balance,
+        // then we will choose the balance with the most funds between inactive and retired.
+        let credited_balance = if !staker.active_balance.is_zero() {
             staker.active_balance += value;
-            credited_balance = BalanceType::Active;
-        } else if staker.inactive_balance > staker.retired_balance {
+            BalanceType::Active
+        } else if staker.inactive_balance >= staker.retired_balance {
             staker.inactive_balance += value;
-            credited_balance = BalanceType::Inactive;
+            BalanceType::Inactive
         } else {
             staker.retired_balance += value;
-            credited_balance = BalanceType::Retired;
-        }
+            BalanceType::Retired
+        };
         self.balance += value;
 
+        // Create the receipt.
         let receipt = AddStakeReceipt {
             credited_balance: credited_balance.clone(),
         };
