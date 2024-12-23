@@ -19,7 +19,10 @@ use nimiq_validator_network::ValidatorNetwork;
 use nimiq_vrf::VrfSeed;
 use parking_lot::RwLock;
 
-use crate::{aggregation::skip_block::SkipBlockAggregation, validator::Validator};
+use crate::{
+    aggregation::skip_block::SkipBlockAggregation,
+    validator::{HealthState, Validator},
+};
 
 pub(crate) enum ProduceMicroBlockEvent {
     MicroBlock,
@@ -38,7 +41,7 @@ struct NextProduceMicroBlockEvent<TValidatorNetwork> {
     producer_timeout: Duration,
     block_separation_time: Duration,
     validator_address: Address,
-    publish_block: bool,
+    health_state: Arc<RwLock<HealthState>>,
 }
 
 impl<TValidatorNetwork: ValidatorNetwork + 'static> NextProduceMicroBlockEvent<TValidatorNetwork> {
@@ -57,7 +60,7 @@ impl<TValidatorNetwork: ValidatorNetwork + 'static> NextProduceMicroBlockEvent<T
         producer_timeout: Duration,
         block_separation_time: Duration,
         validator_address: Address,
-        publish_block: bool,
+        health_state: Arc<RwLock<HealthState>>,
     ) -> Self {
         Self {
             blockchain,
@@ -71,7 +74,7 @@ impl<TValidatorNetwork: ValidatorNetwork + 'static> NextProduceMicroBlockEvent<T
             producer_timeout,
             block_separation_time,
             validator_address,
-            publish_block,
+            health_state,
         }
     }
 
@@ -161,8 +164,8 @@ impl<TValidatorNetwork: ValidatorNetwork + 'static> NextProduceMicroBlockEvent<T
                 num_transactions
             );
 
-            if !self.publish_block {
-                log::warn!("Not publishing block {} ", block.block_number());
+            if !self.health_state.read().publish {
+                log::warn!(block = block.block_number(), "Not publishing block");
                 let event = ProduceMicroBlockEvent::MicroBlock;
                 break Some(Some(event));
             }
@@ -194,6 +197,8 @@ impl<TValidatorNetwork: ValidatorNetwork + 'static> NextProduceMicroBlockEvent<T
                 delay = Duration::from_millis(50);
                 continue;
             }
+
+            self.health_state.write().blk_cnt += 1;
 
             let event = result
                 .map(move |_result| ProduceMicroBlockEvent::MicroBlock)
@@ -420,7 +425,7 @@ impl<TValidatorNetwork: ValidatorNetwork + 'static> ProduceMicroBlock<TValidator
         producer_timeout: Duration,
         block_separation_time: Duration,
         validator_address: Address,
-        publish_block: bool,
+        health_state: Arc<RwLock<HealthState>>,
     ) -> Self {
         let next_event = NextProduceMicroBlockEvent::new(
             blockchain,
@@ -434,7 +439,7 @@ impl<TValidatorNetwork: ValidatorNetwork + 'static> ProduceMicroBlock<TValidator
             producer_timeout,
             block_separation_time,
             validator_address,
-            publish_block,
+            health_state,
         )
         .next()
         .boxed();

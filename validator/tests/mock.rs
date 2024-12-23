@@ -220,7 +220,7 @@ async fn validator_can_recover_from_yellow_health() {
     validator_proxy.validator_health.write().publish = true;
 
     let events = blockchain.read().notifier_as_stream();
-    events.take(30).for_each(|_| future::ready(())).await;
+    events.take(40).for_each(|_| future::ready(())).await;
 
     assert_eq!(
         validator_proxy.validator_health.read().health,
@@ -372,7 +372,7 @@ async fn validator_health_fully_recover() {
     validator_proxy.validator_health.write().publish = true;
 
     let events = blockchain.read().notifier_as_stream();
-    events.take(70).for_each(|_| future::ready(())).await;
+    events.take(100).for_each(|_| future::ready(())).await;
 
     let current_validator_health = validator_proxy.validator_health.read().health;
 
