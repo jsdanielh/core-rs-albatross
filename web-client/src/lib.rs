@@ -7,6 +7,8 @@ pub mod common;
 #[cfg(any(feature = "crypto", feature = "primitives"))]
 mod crypto_utils;
 #[cfg(feature = "primitives")]
+mod multisig;
+#[cfg(feature = "primitives")]
 mod primitives;
 
 #[cfg(test)]

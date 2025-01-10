@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use js_sys::Array;
 use nimiq_serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_derive::TryFromJsValue;
@@ -44,15 +45,17 @@ impl PublicKey {
     /// Throws when an PublicKey cannot be parsed from the argument.
     #[cfg(feature = "primitives")]
     #[wasm_bindgen(js_name = fromAny)]
-    pub fn from_any(addr: &PublicKeyAnyType) -> Result<PublicKey, JsError> {
-        let js_value: &JsValue = addr.unchecked_ref();
+    pub fn from_any(key: &PublicKeyAnyType) -> Result<PublicKey, JsError> {
+        let js_value: &JsValue = key.unchecked_ref();
+
+        if let Ok(public_key) = PublicKey::try_from(js_value) {
+            return Ok(public_key);
+        }
 
         if let Ok(string) = serde_wasm_bindgen::from_value::<String>(js_value.to_owned()) {
             Ok(PublicKey::from_hex(&string)?)
         } else if let Ok(bytes) = serde_wasm_bindgen::from_value::<Vec<u8>>(js_value.to_owned()) {
-            Ok(PublicKey::from(
-                nimiq_keys::Ed25519PublicKey::deserialize_from_vec(&bytes)?,
-            ))
+            Ok(PublicKey::deserialize(&bytes)?)
         } else {
             Err(JsError::new("Could not parse public key"))
         }
@@ -155,6 +158,32 @@ impl PublicKey {
     pub fn native_ref(&self) -> &nimiq_keys::Ed25519PublicKey {
         &self.inner
     }
+
+    pub fn take_native(self) -> nimiq_keys::Ed25519PublicKey {
+        self.inner
+    }
+
+    pub fn unpack_public_keys(
+        keys: &PublicKeyAnyArrayType,
+    ) -> Result<Vec<nimiq_keys::Ed25519PublicKey>, JsError> {
+        // Unpack the array of keys
+        let js_value: &JsValue = keys.unchecked_ref();
+        let array: &Array = js_value
+            .dyn_ref()
+            .ok_or_else(|| JsError::new("`keys` must be an array"))?;
+
+        if array.length() == 0 {
+            return Err(JsError::new("No keys provided"));
+        }
+
+        let mut keys = Vec::<_>::with_capacity(array.length().try_into()?);
+        for any in array.iter() {
+            let key = PublicKey::from_any(&any.into())?.take_native();
+            keys.push(key);
+        }
+
+        Ok(keys)
+    }
 }
 
 #[cfg(feature = "primitives")]
@@ -162,4 +191,7 @@ impl PublicKey {
 extern "C" {
     #[wasm_bindgen(typescript_type = "PublicKey | string | Uint8Array")]
     pub type PublicKeyAnyType;
+
+    #[wasm_bindgen(typescript_type = "(PublicKey | string | Uint8Array)[]")]
+    pub type PublicKeyAnyArrayType;
 }

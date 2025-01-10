@@ -10,7 +10,7 @@ use zeroize::Zeroize;
 use super::{error::InvalidScalarError, MUSIG2_PARAMETER_V};
 
 /// A nonce is a "number only used once" and it is supposed to be kept secret (similar to a private key).
-#[derive(PartialEq, Eq, Debug, Clone, Copy, Zeroize)]
+#[derive(PartialEq, Eq, Debug, Clone, Copy, Zeroize, Default)]
 pub struct Nonce(pub Scalar);
 
 impl Nonce {
@@ -72,7 +72,7 @@ impl<'a> From<&'a [u8; Commitment::SIZE]> for Commitment {
 
 /// A structure holding both the secret nonce and the public commitment.
 /// This is similar to a `KeyPair`.
-#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+#[derive(PartialEq, Eq, Debug, Clone, Copy, Default)]
 #[cfg_attr(feature = "serde-derive", derive(serde::Serialize, serde::Deserialize))]
 pub struct CommitmentPair {
     random_secret: Nonce,
