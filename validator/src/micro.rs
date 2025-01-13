@@ -166,8 +166,7 @@ impl<TValidatorNetwork: ValidatorNetwork + 'static> NextProduceMicroBlockEvent<T
 
             if !self.health_state.read().publish {
                 log::warn!(block = block.block_number(), "Not publishing block");
-                let event = ProduceMicroBlockEvent::MicroBlock;
-                break Some(Some(event));
+                break Some(Some(ProduceMicroBlockEvent::MicroBlock));
             }
 
             // Publish the block. It is valid as we have just created it.
@@ -198,7 +197,9 @@ impl<TValidatorNetwork: ValidatorNetwork + 'static> NextProduceMicroBlockEvent<T
                 continue;
             }
 
-            self.health_state.write().blk_cnt += 1;
+            // Each successfull block will decrease the number of inactivations
+            let current_inactivations = self.health_state.read().inactivations;
+            self.health_state.write().inactivations = current_inactivations.saturating_sub(1);
 
             let event = result
                 .map(move |_result| ProduceMicroBlockEvent::MicroBlock)

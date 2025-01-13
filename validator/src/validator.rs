@@ -1,4 +1,5 @@
 use std::{
+    cmp,
     error::Error,
     future::Future,
     pin::Pin,
@@ -51,8 +52,12 @@ use crate::{
     r#macro::{MappedReturn, ProduceMacroBlock, ProposalTopic},
 };
 
-/// The number of blocks a validator needs to produce in time to improve its health
-const VALIDATOR_HEALTH_THRESHOLD: u32 = 5;
+/// The number of consecutive inactivations from which a validator is considered with yellow health
+const VALIDATOR_YELLOW_HEALTH_INACTIVATIONS: u32 = 2;
+/// The number of consecutive inactivations from which a validator is considered with yellow health
+const VALIDATOR_RED_HEALTH_INACTIVATIONS: u32 = 4;
+// The maximum number of blocks the reactivate transaction can be delayed
+const MAX_REACTIVATE_DELAY: u32 = 10_000;
 
 #[derive(PartialEq)]
 enum ValidatorStakingState {
@@ -75,18 +80,22 @@ pub struct ConsensusState {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ValidatorHealth {
     Green,
-    Yellow(u32),
-    Red(u32),
+    Yellow,
+    Red,
 }
 
 /// Struct that represents the overall Validator Health
 pub struct HealthState {
     /// The current validator health
     pub health: ValidatorHealth,
-    /// Number of blocks that we have produced in time(without being inactivated)
-    pub blk_cnt: u32,
-    /// For testing/debug purposes control wether produced blocks are published by the validator
+    /// For testing/debug purposes control whether produced blocks are published by the validator
     pub publish: bool,
+    /// Number of inactivations that have ocurred in the current epoch
+    pub inactivations: u32,
+    /// Next block number where the re-activate txns should be sent
+    pub reactivate_bn: u32,
+    /// Flag that indicates an ongoing reactivation
+    pub pending_reactivate: bool,
 }
 
 /// Validator inactivity
@@ -234,7 +243,9 @@ where
         let health_state = HealthState {
             health: ValidatorHealth::Green,
             publish: true,
-            blk_cnt: 0,
+            inactivations: 0,
+            reactivate_bn: 0,
+            pending_reactivate: false,
         };
 
         Self {
@@ -508,6 +519,10 @@ where
                 self.on_blockchain_extended(hash);
             }
             BlockchainEvent::EpochFinalized(ref hash) => {
+                // Reset the inactivations counter
+                self.health_state.write().inactivations = 0;
+                // Reset the validator health every epoch
+                self.health_state.write().health = ValidatorHealth::Green;
                 self.init_epoch();
                 // The on_blockchain_extended is necessary for the order of events to not matter.
                 self.on_blockchain_extended(hash);
@@ -537,6 +552,14 @@ where
 
         self.check_reactivate(block.block_number());
         self.init_block_producer(Some(hash));
+
+        let block_number = block.block_number();
+        let blockchain = self.blockchain.read();
+
+        if block_number == self.health_state.read().reactivate_bn {
+            let inactivity_state = self.reactivate(&blockchain);
+            self.validator_state = Some(inactivity_state);
+        }
     }
 
     fn on_blockchain_rebranched(
@@ -718,6 +741,11 @@ where
         )
     }
 
+    // Computes the next block number where we should send the next reactivate transaction
+    fn get_reactivate_delay(&self, inactivations: u32) -> u32 {
+        cmp::min(inactivations.pow(2), MAX_REACTIVATE_DELAY)
+    }
+
     fn reactivate(&self, blockchain: &Blockchain) -> InactivityState {
         let validity_start_height = blockchain.block_number();
 
@@ -733,7 +761,7 @@ where
 
         let cn = self.consensus.clone();
         spawn(async move {
-            debug!("Sending reactivate transaction to the network");
+            info!("Sending reactivate transaction to the network");
             if cn
                 .send_transaction(reactivate_transaction.clone())
                 .await
@@ -878,39 +906,34 @@ where
             let block_number = blockchain.block_number();
             match self.get_staking_state(&blockchain) {
                 ValidatorStakingState::Active => {
-                    drop(blockchain);
                     if self.validator_state.is_some() {
+                        drop(blockchain);
                         self.validator_state = None;
+                        self.health_state.write().pending_reactivate = false;
                         info!("Automatically reactivated.");
                     }
+                    let inactivations = self.health_state.read().inactivations;
+
+                    log::warn!(
+                        address=%self.validator_address.read(),
+                        inactivations,
+                        "Inactivations counter",
+                    );
 
                     let validator_health = self.health_state.read().health;
+
                     match validator_health {
                         ValidatorHealth::Green => {}
-                        ValidatorHealth::Yellow(yellow_block_number) => {
-                            debug!(
-                                address = %self.validator_address.read(),
-                                inactivated = yellow_block_number,
-                                good_blocks = %self.health_state.read().blk_cnt,
-                                "Current validator health is yellow",
-                            );
-                            if self.health_state.read().blk_cnt >= VALIDATOR_HEALTH_THRESHOLD {
-                                log::info!("Changing the validator health back to green");
+                        ValidatorHealth::Yellow => {
+                            if inactivations < VALIDATOR_YELLOW_HEALTH_INACTIVATIONS {
+                                log::info!(inactivations, "Changed validator health to green");
                                 self.health_state.write().health = ValidatorHealth::Green;
-                                self.health_state.write().blk_cnt = 0;
                             }
                         }
-                        ValidatorHealth::Red(red_block_number) => {
-                            debug!(
-                                address = %self.validator_address.read(),
-                                inactivated = red_block_number,
-                                "Current validator health is red",
-                            );
-                            if self.health_state.read().blk_cnt >= VALIDATOR_HEALTH_THRESHOLD {
-                                log::info!("Changing the validator health back to yellow");
-                                self.health_state.write().health =
-                                    ValidatorHealth::Yellow(block_number);
-                                self.health_state.write().blk_cnt = 0;
+                        ValidatorHealth::Red => {
+                            if inactivations < VALIDATOR_RED_HEALTH_INACTIVATIONS {
+                                log::info!(inactivations, "Changed validator health to yellow");
+                                self.health_state.write().health = ValidatorHealth::Yellow;
                             }
                         }
                     }
@@ -924,37 +947,48 @@ where
                             .unwrap_or(true)
                         && self.automatic_reactivate.load(Ordering::Acquire)
                     {
-                        let validator_health = self.health_state.read().health;
-                        match validator_health {
-                            ValidatorHealth::Green => {
-                                log::warn!(
-                                    address=%self.validator_address.read(),
-                                    "The validator was inactivated, changing its health to Yellow",
-                                );
-                                let inactivity_state = self.reactivate(&blockchain);
-                                drop(blockchain);
-                                self.validator_state = Some(inactivity_state);
-                                self.health_state.write().health =
-                                    ValidatorHealth::Yellow(block_number);
-                                self.health_state.write().blk_cnt = 0;
+                        // Keep track of how many times we have been deactivated in the current epoch.
+                        if !self.health_state.read().pending_reactivate {
+                            let mut health_state = self.health_state.write();
+                            health_state.inactivations += 1;
+                            health_state.reactivate_bn = block_number
+                                + self.get_reactivate_delay(health_state.inactivations);
+                            health_state.pending_reactivate = true;
+                            drop(health_state);
+
+                            let inactivations = self.health_state.read().inactivations;
+
+                            let validator_health = self.health_state.read().health;
+                            match validator_health {
+                                ValidatorHealth::Green => {
+                                    if inactivations >= VALIDATOR_YELLOW_HEALTH_INACTIVATIONS {
+                                        log::warn!(
+                                            inactivations,
+                                            "Changed validator health to yellow"
+                                        );
+                                        self.health_state.write().health = ValidatorHealth::Yellow;
+                                    }
+                                }
+                                ValidatorHealth::Yellow => {
+                                    if inactivations >= VALIDATOR_RED_HEALTH_INACTIVATIONS {
+                                        log::warn!(
+                                            inactivations,
+                                            "Changed validator health to red"
+                                        );
+                                        self.health_state.write().health = ValidatorHealth::Red;
+                                    }
+                                }
+                                ValidatorHealth::Red => {
+                                    log::warn!("Validator health is still red")
+                                }
                             }
-                            ValidatorHealth::Yellow(_) => {
-                                log::warn!(
-                                    address=%self.validator_address.read(),
-                                    "The validator was inactivated again, changing its health to Red",
-                                );
-                                let inactivity_state = self.reactivate(&blockchain);
-                                drop(blockchain);
-                                self.validator_state = Some(inactivity_state);
-                                self.health_state.write().health =
-                                    ValidatorHealth::Red(block_number);
-                                self.health_state.write().blk_cnt = 0;
-                            }
-                            ValidatorHealth::Red(_) => {
-                                log::warn!(
-                                    "The validator needs human intervention, no automatic reactivate"
-                                );
-                            }
+
+                            log::warn!(
+                                "Current inactivations counter: {}, next reactivate bn {}, current bn {} ",
+                                inactivations,
+                                self.health_state.read().reactivate_bn,
+                                block_number
+                            );
                         }
                     }
                 }

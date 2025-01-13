@@ -107,6 +107,7 @@ async fn four_validators_can_create_micro_blocks() {
         &(1u64..=4u64).collect::<Vec<_>>(),
         &mut Some(hub),
         false,
+        false,
     )
     .await;
 
@@ -145,9 +146,14 @@ async fn validators_can_do_skip_block() {
     let env =
         MdbxDatabase::new_volatile(Default::default()).expect("Could not open a volatile database");
 
-    let mut validators =
-        build_validators::<Network>(env, &(5u64..=10u64).collect::<Vec<_>>(), &mut None, false)
-            .await;
+    let mut validators = build_validators::<Network>(
+        env,
+        &(5u64..=10u64).collect::<Vec<_>>(),
+        &mut None,
+        false,
+        false,
+    )
+    .await;
 
     // Disconnect the next block producer.
     let _validator = pop_validator_for_slot(
@@ -183,9 +189,14 @@ async fn validator_can_recover_from_yellow_health() {
     let env =
         MdbxDatabase::new_volatile(Default::default()).expect("Could not open a volatile database");
 
-    let validators =
-        build_validators::<Network>(env, &(5u64..=10u64).collect::<Vec<_>>(), &mut None, false)
-            .await;
+    let validators = build_validators::<Network>(
+        env,
+        &(5u64..=10u64).collect::<Vec<_>>(),
+        &mut None,
+        false,
+        true,
+    )
+    .await;
 
     // Listen for blockchain events from the new block producer (after a skip block).
     let validator = validators.first().unwrap();
@@ -202,16 +213,18 @@ async fn validator_can_recover_from_yellow_health() {
 
     validator_proxy.validator_health.write().publish = false;
 
-    events.take(10).for_each(|_| future::ready(())).await;
+    log::info!(
+        "Validator proxy address {}",
+        validator_proxy.validator_address.read()
+    );
+
+    events.take(30).for_each(|_| future::ready(())).await;
 
     let current_validator_health = validator_proxy.validator_health.read().health;
 
     match current_validator_health {
-        ValidatorHealth::Yellow(block_number) => {
-            log::info!(
-                "Current validator health is yellow, as expected, inactivated block {}",
-                block_number
-            )
+        ValidatorHealth::Yellow => {
+            log::info!("Current validator health is yellow, as expecteds",)
         }
         _ => panic!("Validator Health different than expected"),
     };
@@ -220,7 +233,7 @@ async fn validator_can_recover_from_yellow_health() {
     validator_proxy.validator_health.write().publish = true;
 
     let events = blockchain.read().notifier_as_stream();
-    events.take(40).for_each(|_| future::ready(())).await;
+    events.take(30).for_each(|_| future::ready(())).await;
 
     assert_eq!(
         validator_proxy.validator_health.read().health,
@@ -233,9 +246,14 @@ async fn validator_health_to_red() {
     let env =
         MdbxDatabase::new_volatile(Default::default()).expect("Could not open a volatile database");
 
-    let validators =
-        build_validators::<Network>(env, &(5u64..=10u64).collect::<Vec<_>>(), &mut None, false)
-            .await;
+    let validators = build_validators::<Network>(
+        env,
+        &(5u64..=10u64).collect::<Vec<_>>(),
+        &mut None,
+        false,
+        true,
+    )
+    .await;
 
     // Listen for blockchain events from the new block producer (after a skip block).
     let validator = validators.first().unwrap();
@@ -252,16 +270,13 @@ async fn validator_health_to_red() {
 
     validator_proxy.validator_health.write().publish = false;
 
-    events.take(10).for_each(|_| future::ready(())).await;
+    events.take(30).for_each(|_| future::ready(())).await;
 
     let current_validator_health = validator_proxy.validator_health.read().health;
 
     match current_validator_health {
-        ValidatorHealth::Yellow(block_number) => {
-            log::info!(
-                "Current validator health is yellow, as expected, inactivated block {}",
-                block_number
-            )
+        ValidatorHealth::Yellow => {
+            log::info!("Current validator health is yellow, as expected",)
         }
         _ => panic!("Validator Health different than expected"),
     };
@@ -274,11 +289,8 @@ async fn validator_health_to_red() {
     let current_validator_health = validator_proxy.validator_health.read().health;
 
     match current_validator_health {
-        ValidatorHealth::Red(block_number) => {
-            log::info!(
-                "Current validator health is red, as expected, inactivated block {}",
-                block_number
-            )
+        ValidatorHealth::Red => {
+            log::info!("Current validator health is red, as expected",)
         }
         _ => panic!("Validator Health different than expected"),
     };
@@ -289,13 +301,17 @@ async fn validator_health_fully_recover() {
     let env =
         MdbxDatabase::new_volatile(Default::default()).expect("Could not open a volatile database");
 
-    let validators =
-        build_validators::<Network>(env, &(5u64..=10u64).collect::<Vec<_>>(), &mut None, false)
-            .await;
+    let validators = build_validators::<Network>(
+        env,
+        &(5u64..=10u64).collect::<Vec<_>>(),
+        &mut None,
+        false,
+        true,
+    )
+    .await;
 
     // Listen for blockchain events from the new block producer (after a skip block).
     let validator = validators.first().unwrap();
-    let consensus = validator.consensus.clone();
     let validator_proxy = validator.proxy();
     let validator_address = validator.validator_address();
 
@@ -316,16 +332,13 @@ async fn validator_health_fully_recover() {
 
     validator_proxy.validator_health.write().publish = false;
 
-    events.take(10).for_each(|_| future::ready(())).await;
+    events.take(30).for_each(|_| future::ready(())).await;
 
     let current_validator_health = validator_proxy.validator_health.read().health;
 
     match current_validator_health {
-        ValidatorHealth::Yellow(block_number) => {
-            log::info!(
-                "Current validator health is yellow, as expected, inactivated block {}",
-                block_number
-            )
+        ValidatorHealth::Yellow => {
+            log::info!("Current validator health is yellow, as expected",)
         }
         _ => panic!("Validator Health different than expected"),
     };
@@ -338,36 +351,11 @@ async fn validator_health_fully_recover() {
     let current_validator_health = validator_proxy.validator_health.read().health;
 
     match current_validator_health {
-        ValidatorHealth::Red(block_number) => {
-            log::info!(
-                "Current validator health is red, as expected, inactivated block {}",
-                block_number
-            )
+        ValidatorHealth::Red => {
+            log::info!("Current validator health is red, as expected")
         }
         _ => panic!("Validator Health different than expected"),
     };
-
-    // Since the validator needs manual intervention, we are going to send the reactivate transaction
-
-    let reactivate_transaction = TransactionBuilder::new_reactivate_validator(
-        &validator_proxy.fee_key.read(),
-        validator_address,
-        &validator_proxy.signing_key.read(),
-        Coin::ZERO,
-        Policy::genesis_block_number(),
-        NetworkId::UnitAlbatross,
-    );
-
-    spawn(async move {
-        log::info!("Sending reactivate transaction to the network");
-        if consensus
-            .send_transaction(reactivate_transaction.clone())
-            .await
-            .is_err()
-        {
-            log::error!("Failed to send reactivate transaction");
-        }
-    });
 
     validator_proxy.validator_health.write().publish = true;
 
@@ -429,6 +417,7 @@ async fn validator_can_catch_up() {
         env,
         &(9u64..=16u64).collect::<Vec<_>>(),
         &mut Some(hub),
+        false,
         false,
     )
     .await;

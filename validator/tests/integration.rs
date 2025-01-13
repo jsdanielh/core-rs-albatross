@@ -86,9 +86,14 @@ async fn four_validators_can_create_an_epoch() {
     let env =
         MdbxDatabase::new_volatile(Default::default()).expect("Could not open a volatile database");
 
-    let validators =
-        build_validators::<Network>(env, &(1u64..=4u64).collect::<Vec<_>>(), &mut None, false)
-            .await;
+    let validators = build_validators::<Network>(
+        env,
+        &(1u64..=4u64).collect::<Vec<_>>(),
+        &mut None,
+        false,
+        false,
+    )
+    .await;
 
     let blockchain = Arc::clone(&validators.first().unwrap().blockchain);
 
