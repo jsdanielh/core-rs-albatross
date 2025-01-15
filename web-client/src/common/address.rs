@@ -1,11 +1,16 @@
 use std::str::FromStr;
 
+#[cfg(feature = "primitives")]
+use nimiq_keys::multisig::address::{combine_public_keys, compute_address};
 use nimiq_serde::Deserialize;
 #[cfg(feature = "primitives")]
 use nimiq_serde::Serialize;
 use wasm_bindgen::prelude::*;
 #[cfg(feature = "primitives")]
 use wasm_bindgen_derive::TryFromJsValue;
+
+#[cfg(feature = "primitives")]
+use crate::primitives::public_key::{PublicKey, PublicKeyAnyArrayType};
 
 /// An object representing a Nimiq address.
 /// Offers methods to parse and format addresses from and to strings.
@@ -71,6 +76,18 @@ impl Address {
         Ok(Address::from(
             nimiq_keys::Address::from_user_friendly_address(str)?,
         ))
+    }
+
+    /// Computes the multisig address of a list of signer public keys.
+    #[cfg(feature = "primitives")]
+    #[wasm_bindgen(js_name = fromPublicKeys)]
+    pub fn from_public_keys(
+        public_keys: &PublicKeyAnyArrayType,
+        num_signers: usize,
+    ) -> Result<Address, JsError> {
+        let public_keys = PublicKey::unpack_public_keys(public_keys)?;
+        let combined_public_keys = combine_public_keys(public_keys, num_signers);
+        Ok(Address::from(compute_address(&combined_public_keys)))
     }
 
     /// Formats the address into a plain string format.
