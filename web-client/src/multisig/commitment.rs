@@ -5,6 +5,8 @@ use nimiq_serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_derive::TryFromJsValue;
 
+use super::random_secret::RandomSecret;
+
 /// A cryptographic commitment to a {@link RandomSecret}. The commitment is public, while the secret is, well, secret.
 #[derive(TryFromJsValue)]
 #[wasm_bindgen]
@@ -23,6 +25,13 @@ impl Commitment {
     #[wasm_bindgen(getter = serializedSize)]
     pub fn serialized_size(&self) -> usize {
         Commitment::size()
+    }
+
+    /// Derives a commitment from an existing random secret.
+    pub fn derive(random_secret: &RandomSecret) -> Commitment {
+        let nonce = *random_secret.native_ref();
+        let commitment = nonce.commit();
+        Commitment::from(commitment)
     }
 
     /// Sums up multiple commitments into one aggregated commitment.

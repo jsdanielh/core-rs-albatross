@@ -62,12 +62,22 @@ impl CommitmentPair {
         )
     }
 
-    /// Creates a new commitment pair from a byte array.
-    ///
-    /// Throws when the byte array is not exactly 32 bytes long.
+    /// Derives a commitment pair from an existing random secret.
+    pub fn derive(random_secret: &RandomSecret) -> CommitmentPair {
+        let nonce = *random_secret.native_ref();
+        let commitment = nonce.commit();
+        let commitment_pair =
+            nimiq_keys::multisig::commitment::CommitmentPair::new(nonce, commitment);
+        CommitmentPair::from(commitment_pair)
+    }
+
     #[wasm_bindgen(constructor)]
-    pub fn new(bytes: &[u8]) -> Result<CommitmentPair, JsError> {
-        Self::deserialize(bytes)
+    pub fn new(random_secret: &RandomSecret, commitment: &Commitment) -> CommitmentPair {
+        let commitment_pair = nimiq_keys::multisig::commitment::CommitmentPair::new(
+            *random_secret.native_ref(),
+            *commitment.native_ref(),
+        );
+        CommitmentPair::from(commitment_pair)
     }
 
     /// Serializes the commitment pair to a byte array.
